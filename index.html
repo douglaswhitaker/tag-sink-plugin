@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Tag Sink</title>
+<style>
+    :root {
+        --bg: #1e2530;
+        --panel: #262e3b;
+        --border: #3a4454;
+        --text: #e6e9ef;
+        --muted: #9aa5b5;
+        --accent: #4f8ff7;
+        --accent-hover: #6ba0ff;
+        --sink: #ffb454;
+        --danger: #e5605a;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 13px;
+    }
+    #app { display: flex; flex-direction: column; height: 100vh; }
+    header {
+        padding: 14px 16px 10px 16px;
+        border-bottom: 1px solid var(--border);
+    }
+    header h1 {
+        margin: 0 0 4px 0;
+        font-size: 15px;
+        font-weight: 600;
+    }
+    #folderLine {
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+    }
+    #folderName { color: var(--text); font-weight: 500; }
+    button {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+        font-weight: 600;
+    }
+    button.primary:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: default; }
+    #itemListWrap { flex: 1; overflow-y: auto; padding: 8px 16px; }
+    .item-row {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 8px 10px;
+        margin-bottom: 6px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+    }
+    .item-row.sink { border-color: var(--sink); }
+    .item-name { font-weight: 500; }
+    .item-name .badge {
+        display: inline-block;
+        margin-left: 6px;
+        font-size: 10px;
+        color: var(--sink);
+        border: 1px solid var(--sink);
+        border-radius: 4px;
+        padding: 1px 5px;
+        vertical-align: middle;
+    }
+    .item-tags { color: var(--muted); font-size: 12px; }
+    #emptyState {
+        color: var(--muted);
+        padding: 24px 8px;
+        text-align: center;
+        line-height: 1.5;
+    }
+    footer {
+        border-top: 1px solid var(--border);
+        padding: 10px 16px 14px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    #syncBtn { width: 100%; padding: 10px; font-size: 13px; }
+    #status {
+        min-height: 16px;
+        color: var(--muted);
+        font-size: 12px;
+    }
+    #status.ok { color: #7ed99a; }
+    #status.err { color: var(--danger); }
+    details {
+        border-top: 1px solid var(--border);
+        padding-top: 8px;
+        margin-top: 2px;
+    }
+    summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+    }
+    .settings-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+    }
+    .settings-row label {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 12px;
+    }
+    input[type=text] {
+        flex: 1;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 5px;
+        padding: 5px 8px;
+        font-size: 12px;
+    }
+    .hint {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.5;
+    }
+</style>
+</head>
+<body>
+<div id="app">
+    <header>
+        <h1>Tag Sink</h1>
+        <div id="folderLine">
+            <span>Folder: <span id="folderName">(none selected)</span></span>
+            <button id="refreshBtn">Refresh</button>
+        </div>
+    </header>
+
+    <div id="itemListWrap">
+        <div id="emptyState">
+            Select a dataset folder in Eagle, then click Refresh.
+        </div>
+        <div id="itemList"></div>
+    </div>
+
+    <footer>
+        <div id="status"></div>
+        <button id="syncBtn" class="primary">Sync Tags to Tag-Sink</button>
+
+        <details>
+            <summary>Settings</summary>
+            <div class="settings-row">
+                <label for="markerTagInput">Marker tag</label>
+                <input type="text" id="markerTagInput" spellcheck="false">
+                <button id="saveMarkerBtn">Save</button>
+            </div>
+            <div class="hint">
+                The marker tag identifies which file is the "tag-sink" for a folder.
+                Apply it to a file (any file) in Eagle the normal way, and Sync will
+                aggregate every other tag in the folder onto that file. If no file in
+                the folder has this tag, Sync creates a small blank placeholder image
+                and applies it there.
+            </div>
+        </details>
+    </footer>
+</div>
+
+<script src="js/plugin.js"></script>
+</body>
+</html>

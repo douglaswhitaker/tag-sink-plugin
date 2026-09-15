@@ -1,0 +1,28 @@
+{
+    "id": "TAGSINKPLUGIN01",
+    "version": "1.0.0",
+    "platform": "all",
+    "arch": "all",
+    "name": "Tag Sink",
+    "logo": "logo.png",
+    "keywords": ["tags", "dataset", "catalog", "sync"],
+    "devTools": true,
+    "main": {
+        "url": "index.html",
+        "width": 480,
+        "height": 640,
+        "minWidth": 380,
+        "minHeight": 420,
+        "alwaysOnTop": false,
+        "frame": true,
+        "fullscreenable": false,
+        "maximizable": true,
+        "minimizable": true,
+        "resizable": true,
+        "backgroundColor": "#1e2530",
+        "childWindow": false,
+        "followCursor": false,
+        "multiple": false,
+        "runAfterInstall": false
+    }
+}
