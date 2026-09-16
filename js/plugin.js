@@ -89,7 +89,7 @@ let currentItems = [];    // items in that folder, refreshed on demand
 // The plugin-create callback calls refreshFolderImpl() directly so it does
 // not wait on its own readiness promise.
 let resolvePluginReady;
-const pluginReady = new Promise((resolve) => {
+const pluginReadyPromise = new Promise((resolve) => {
     resolvePluginReady = resolve;
 });
 
@@ -120,6 +120,10 @@ async function refreshFolderImpl() {
 // before plugin-create has finished, wait until Eagle's plugin API is ready.
 async function refreshFolder() {
     await pluginReady;
+    return refreshFolderImpl();
+}
+async function refreshFolder() {
+    await pluginReadyPromise;
     return refreshFolderImpl();
 }
 
@@ -168,18 +172,42 @@ function createPlaceholderImageFile(baseName) {
 }
 
 // ---- The main action: compute the tag union and write it to the sink --
-async function syncTags() {
-    // Protect against a click/event arriving during Eagle's startup race.
-    await pluginReady;
+async function syncTags(options = {}) {
+    const fromShortcut = options.fromShortcut === true;
+
+    // A shortcut can be invoked before onPluginCreate has completed.
+    await pluginReadyPromise;
+
+    // Always obtain the currently selected folder for a shortcut invocation.
+    // This avoids relying on stale UI state when switching between datasets.
+    if (fromShortcut) {
+        const folders = await eagle.folder.getSelected();
+        if (!folders || folders.length === 0) {
+            await showNotification(
+                'Tag Sink',
+                'No Eagle folder is selected.',
+                true
+            );
+            return;
+        }
+        currentFolder = folders[0];
+    }
 
     if (!currentFolder) {
         setStatus('Select a folder in Eagle first, then click Refresh.', 'err');
+        if (fromShortcut) {
+            await showNotification(
+                'Tag Sink',
+                'No Eagle folder is selected.',
+                true
+            );
+        }
         return;
     }
 
     const markerTag = getMarkerTag();
     setStatus('Syncing…');
-    $('syncBtn').disabled = true;
+    if ($('syncBtn')) $('syncBtn').disabled = true;
 
     try {
         // Re-fetch fresh data in case tags changed since the last refresh.
@@ -188,8 +216,7 @@ async function syncTags() {
         const existingSinks = items.filter((item) => item.tags.includes(markerTag));
 
         // Build the union of every tag used anywhere in the folder, other
-        // than the marker tag itself (that one is metadata about the sink's
-        // role, not a content tag we want mixed into search results).
+        // than the marker tag itself.
         const unionTags = new Set();
         items.forEach((item) => {
             item.tags.forEach((tag) => {
@@ -198,8 +225,9 @@ async function syncTags() {
         });
         const finalTags = [...unionTags, markerTag];
 
+        let message;
+
         if (existingSinks.length === 0) {
-            // No sink yet — create a small placeholder image and tag it.
             const filePath = createPlaceholderImageFile('tag-sink');
             await eagle.item.addFromPath(filePath, {
                 name: 'tag-sink',
@@ -207,24 +235,51 @@ async function syncTags() {
                 folders: [currentFolder.id],
                 annotation: 'Auto-created by the Tag Sink plugin.',
             });
+            message = `Created tag-sink in "${currentFolder.name}" with ${unionTags.size} tag(s).`;
             setStatus(`Created a new tag-sink file with ${unionTags.size} tag(s).`, 'ok');
         } else {
-            // One or more files already marked as the sink — mirror the
-            // tag union onto every one of them.
             for (const sink of existingSinks) {
                 sink.tags = finalTags;
                 await sink.save();
             }
             const plural = existingSinks.length === 1 ? '' : 's';
+            message = `Synced ${unionTags.size} tag(s) to ${existingSinks.length} tag-sink file${plural} in "${currentFolder.name}".`;
             setStatus(`Synced ${unionTags.size} tag(s) to ${existingSinks.length} tag-sink file${plural}.`, 'ok');
         }
 
-        await refreshFolder();
+        // Refresh the visible UI when it is open. The shortcut itself does
+        // not depend on this refresh.
+        await refreshFolderImpl();
+
+        if (fromShortcut) {
+            await showNotification('Tag Sink', message, false);
+        }
     } catch (err) {
         console.error(err);
         setStatus('Sync failed — see DevTools console (F12) for details.', 'err');
+        if (fromShortcut) {
+            const detail = err && err.message ? ` ${err.message}` : '';
+            await showNotification('Tag Sink — Error', `Sync failed.${detail}`, true);
+        }
     } finally {
-        $('syncBtn').disabled = false;
+        if ($('syncBtn')) $('syncBtn').disabled = false;
+    }
+}
+
+// Native Eagle notification. Notifications auto-dismiss, so shortcut
+// operation never requires the user to click anything.
+async function showNotification(title, body, isError = false) {
+    try {
+        await eagle.notification.show({
+            title,
+            body,
+            mute: isError,
+            duration: isError ? 5000 : 3000,
+        });
+    } catch (notificationError) {
+        // Notification failure should never turn a successful sync into a
+        // reported sync failure.
+        console.warn('Could not show Eagle notification:', notificationError);
     }
 }
 
@@ -245,10 +300,6 @@ function initUI() {
 
 // ---- Eagle lifecycle hooks ------------------------------------------------
 // Called once when the plugin window is first created.
-//
-// IMPORTANT: Do not call the public refreshFolder() here because that waits
-// on pluginReady. Instead, do the initial API work directly and resolve the
-// readiness promise only after this callback has finished its initialization.
 eagle.onPluginCreate(async (plugin) => {
     console.log('Tag Sink loaded:', plugin.manifest.name, plugin.manifest.version);
     initUI();
@@ -259,15 +310,28 @@ eagle.onPluginCreate(async (plugin) => {
         console.error('Initial folder refresh failed:', err);
         setStatus('Initial refresh failed — click Refresh to try again.', 'err');
     } finally {
-        // This must happen even if the initial refresh fails, otherwise a
-        // plugin-show handler that arrived early would wait forever.
+        // Must resolve even after an initial-refresh error, otherwise a
+        // shortcut/onPluginShow event arriving early would wait forever.
         resolvePluginReady();
     }
 });
 
-// Called every time the plugin window is brought back into view — handy
-// because you'll typically: click a folder in Eagle, then switch to this
-// plugin window to sync, over and over.
+// When the plugin is run from Eagle (including its manifest keyboard
+// shortcut), perform the sync without requiring interaction with the window.
+// The notification is the user-facing result and auto-dismisses.
+eagle.onPluginRun(async () => {
+    await syncTags({ fromShortcut: true });
+
+    // The shortcut/run action is intended to be background-like. If Eagle
+    // opened the plugin window just to run the action, hide it afterward.
+    try {
+        await eagle.window.hide();
+    } catch (err) {
+        console.warn('Could not hide Tag Sink window after shortcut run:', err);
+    }
+});
+
+// When the plugin window is displayed normally, refresh its contents.
 eagle.onPluginShow(async () => {
     await refreshFolder();
 });

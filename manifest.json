@@ -1,11 +1,16 @@
 {
     "id": "TAGSINKPLUGIN01",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "platform": "all",
     "arch": "all",
     "name": "Tag Sink",
     "logo": "logo.png",
-    "keywords": ["tags", "dataset", "catalog", "sync"],
+    "keywords": [
+        "tags",
+        "dataset",
+        "catalog",
+        "sync"
+    ],
     "devTools": true,
     "main": {
         "url": "index.html",
@@ -23,6 +28,7 @@
         "childWindow": false,
         "followCursor": false,
         "multiple": false,
-        "runAfterInstall": false
+        "runAfterInstall": false,
+        "shortcut": "CommandOrControl+Shift+T"
     }
 }
