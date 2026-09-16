@@ -78,8 +78,23 @@ function setStatus(message, kind) {
 let currentFolder = null; // the Folder object currently selected in Eagle
 let currentItems = [];    // items in that folder, refreshed on demand
 
+// ---- Eagle lifecycle readiness ------------------------------------------
+// Eagle can fire plugin-show before the asynchronous plugin-create handler
+// has finished initializing the plugin API. In particular, calls such as
+// eagle.folder.getSelected() can fail with:
+//   "This method can only be used after the plugin-create event is triggered."
+//
+// Keep a promise that resolves only after plugin-create has completed. Event
+// handlers and UI actions that use the Eagle API wait for this promise.
+// The plugin-create callback calls refreshFolderImpl() directly so it does
+// not wait on its own readiness promise.
+let resolvePluginReady;
+const pluginReady = new Promise((resolve) => {
+    resolvePluginReady = resolve;
+});
+
 // ---- Core: refresh the view from whatever folder is selected in Eagle -
-async function refreshFolder() {
+async function refreshFolderImpl() {
     const folders = await eagle.folder.getSelected();
 
     if (!folders || folders.length === 0) {
@@ -99,6 +114,13 @@ async function refreshFolder() {
     currentItems = await eagle.item.get({ folders: [currentFolder.id] });
     renderItemList(currentItems);
     setStatus(`${currentItems.length} file(s) in this folder.`);
+}
+
+// Public refresh entry point. If plugin-show or a button click happens
+// before plugin-create has finished, wait until Eagle's plugin API is ready.
+async function refreshFolder() {
+    await pluginReady;
+    return refreshFolderImpl();
 }
 
 // ---- Render the file list, highlighting whichever file(s) carry the
@@ -147,6 +169,9 @@ function createPlaceholderImageFile(baseName) {
 
 // ---- The main action: compute the tag union and write it to the sink --
 async function syncTags() {
+    // Protect against a click/event arriving during Eagle's startup race.
+    await pluginReady;
+
     if (!currentFolder) {
         setStatus('Select a folder in Eagle first, then click Refresh.', 'err');
         return;
@@ -220,10 +245,24 @@ function initUI() {
 
 // ---- Eagle lifecycle hooks ------------------------------------------------
 // Called once when the plugin window is first created.
+//
+// IMPORTANT: Do not call the public refreshFolder() here because that waits
+// on pluginReady. Instead, do the initial API work directly and resolve the
+// readiness promise only after this callback has finished its initialization.
 eagle.onPluginCreate(async (plugin) => {
     console.log('Tag Sink loaded:', plugin.manifest.name, plugin.manifest.version);
     initUI();
-    await refreshFolder();
+
+    try {
+        await refreshFolderImpl();
+    } catch (err) {
+        console.error('Initial folder refresh failed:', err);
+        setStatus('Initial refresh failed — click Refresh to try again.', 'err');
+    } finally {
+        // This must happen even if the initial refresh fails, otherwise a
+        // plugin-show handler that arrived early would wait forever.
+        resolvePluginReady();
+    }
 });
 
 // Called every time the plugin window is brought back into view — handy
