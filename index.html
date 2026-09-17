@@ -162,7 +162,7 @@
     <footer>
         <div id="status"></div>
         <button id="syncBtn" class="primary">Sync Tags to Tag-Sink</button>
-        <button id="fileTypeBtn">Add File Types to Tag-Sink</button>
+        <button id="fileTypeBtn">Add File Types to Files</button>
 
         <details>
             <summary>Settings</summary>
@@ -170,6 +170,10 @@
                 <label for="markerTagInput">Marker tag</label>
                 <input type="text" id="markerTagInput" spellcheck="false">
                 <button id="saveMarkerBtn">Save</button>
+            </div>
+            <div class="settings-row">
+                <label for="recursiveCheckbox">Include subdirectories</label>
+                <input type="checkbox" id="recursiveCheckbox">
             </div>
             <div class="settings-row">
                 <label for="autoCloseCheckbox">Close after operation</label>
@@ -180,7 +184,7 @@
                 Apply it to a file (any file) in Eagle the normal way, and Sync will
                 aggregate every other tag in the folder onto that file. If no file in
                 the folder has this tag, Sync creates a small blank placeholder image
-                and applies it there. Use "Add File Types to Tag-Sink" separately to add each file extension (such as csv, xlsx, or pdf) as a tag.
+                and applies it there. Use "Add File Types to Files" separately to add each file extension (such as csv, xlsx, or pdf) as a tag. If "Include subdirectories" is enabled, Sync walks all descendants, creates a tag-sink in folders that lack one, syncs children first, and then gives the parent sink the union of tags from the entire subtree.
             </div>
         </details>
     </footer>

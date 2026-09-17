@@ -47,8 +47,10 @@ const path = require('path');
 // persists between plugin launches on this machine.
 const MARKER_TAG_STORAGE_KEY = 'tagsink.markerTag';
 const AUTO_CLOSE_STORAGE_KEY = 'tagsink.autoClose';
+const RECURSIVE_STORAGE_KEY = 'tagsink.recursive';
 const DEFAULT_MARKER_TAG = 'tag-sink';
 const DEFAULT_AUTO_CLOSE = false;
+const DEFAULT_RECURSIVE = false;
 
 function getMarkerTag() {
     return localStorage.getItem(MARKER_TAG_STORAGE_KEY) || DEFAULT_MARKER_TAG;
@@ -65,6 +67,14 @@ function getAutoClose() {
 
 function setAutoClose(value) {
     localStorage.setItem(AUTO_CLOSE_STORAGE_KEY, value ? 'true' : 'false');
+}
+
+function getRecursive() {
+    return localStorage.getItem(RECURSIVE_STORAGE_KEY) === 'true';
+}
+
+function setRecursive(value) {
+    localStorage.setItem(RECURSIVE_STORAGE_KEY, value ? 'true' : 'false');
 }
 
 // ---- Small DOM helpers ------------------------------------------------
@@ -102,6 +112,86 @@ let resolvePluginReady;
 const pluginReadyPromise = new Promise((resolve) => {
     resolvePluginReady = resolve;
 });
+
+// ---- Folder hierarchy helpers -------------------------------------------
+// Eagle exposes each folder's direct children through `folder.children`.
+// Walking the hierarchy this way avoids relying on a second global folder
+// lookup and lets us process each subtree bottom-up in one recursive pass.
+function uniqueTagsFromItems(items, markerTag) {
+    const tags = new Set();
+    items.forEach((item) => {
+        // Sink files are outputs of this plugin, not source files. Excluding
+        // them is important: otherwise an old/stale sink tag can never be
+        // removed on a later sync.
+        if ((item.tags || []).includes(markerTag)) return;
+        (item.tags || []).forEach((tag) => {
+            if (tag !== markerTag) tags.add(tag);
+        });
+    });
+    return tags;
+}
+
+// Sync one folder from its own files plus the already-computed tag sets of
+// its direct child folders.
+async function syncOneFolder(folder, markerTag, childTagSets = []) {
+    let items = await eagle.item.get({ folders: [folder.id] });
+    let sinks = items.filter((item) => (item.tags || []).includes(markerTag));
+    let createdSink = false;
+
+    if (sinks.length === 0) {
+        const filePath = createPlaceholderImageFile(folder.name || 'tag-sink');
+        await eagle.item.addFromPath(filePath, {
+            name: 'tag-sink',
+            tags: [markerTag],
+            folders: [folder.id],
+            annotation: 'Auto-created by the Tag Sink plugin.',
+        });
+        createdSink = true;
+        items = await eagle.item.get({ folders: [folder.id] });
+        sinks = items.filter((item) => (item.tags || []).includes(markerTag));
+    }
+
+    const unionTags = uniqueTagsFromItems(items, markerTag);
+    childTagSets.forEach((tagSet) => {
+        tagSet.forEach((tag) => {
+            if (tag !== markerTag) unionTags.add(tag);
+        });
+    });
+
+    const finalTags = [...unionTags, markerTag];
+
+    for (const sink of sinks) {
+        sink.tags = finalTags;
+        await sink.save();
+    }
+
+    return {
+        folder,
+        items,
+        sinks,
+        tags: unionTags,
+        tagCount: unionTags.size,
+        createdSink,
+    };
+}
+
+// Recursively sync the selected folder's entire subtree, deepest folders
+// first. Each child returns its complete tag set, which is then included in
+// the parent's sink. This is the key behavior: one click on the parent
+// handles every descendant automatically.
+async function syncFolderTree(folder, markerTag, results = []) {
+    const children = Array.isArray(folder.children) ? folder.children : [];
+    const childResults = [];
+
+    for (const child of children) {
+        childResults.push(await syncFolderTree(child, markerTag, results));
+    }
+
+    const childTagSets = childResults.map((result) => result.tags);
+    const result = await syncOneFolder(folder, markerTag, childTagSets);
+    results.push(result);
+    return result;
+}
 
 // ---- Core: refresh the view from whatever folder is selected in Eagle -
 async function refreshFolderImpl() {
@@ -178,9 +268,10 @@ function createPlaceholderImageFile(baseName) {
 }
 
 // ---- File-type tagging ---------------------------------------------------
-// Eagle exposes the file extension as `item.ext`. We use the extension itself
-// as a tag, e.g. "csv", "xlsx", "pdf". The tag-sink's own extension is not
-// included.
+// Eagle exposes the file extension as `item.ext`. File-type tags are applied
+// to the original files themselves, rather than to the tag-sink. This makes
+// them ordinary source tags, so a subsequent sync will propagate them to the
+// appropriate sink (including through a recursive folder tree).
 async function addFileTypesToSink() {
     await pluginReadyPromise;
 
@@ -193,55 +284,57 @@ async function addFileTypesToSink() {
     currentFolder = folders[0];
 
     const markerTag = getMarkerTag();
-    setStatus('Adding file-type tags…');
+    const recursive = getRecursive();
+    setStatus(recursive ? 'Adding file-type tags to files in the folder tree…' : 'Adding file-type tags to files…');
     if ($('fileTypeBtn')) $('fileTypeBtn').disabled = true;
 
     try {
-        const items = await eagle.item.get({ folders: [currentFolder.id] });
-        const sinks = items.filter((item) => item.tags.includes(markerTag));
+        const foldersToProcess = recursive ? getFolderTreeList(currentFolder) : [currentFolder];
+        let taggedFileCount = 0;
+        const fileTypes = new Set();
 
-        if (sinks.length === 0) {
-            setStatus('No tag-sink found. Run "Sync Tags to Tag-Sink" first.', 'err');
-            await showNotification(
-                'Tag Sink',
-                'No tag-sink found. Run a normal tag sync first.',
-                true
-            );
-            return;
+        for (const folder of foldersToProcess) {
+            const items = await eagle.item.get({ folders: [folder.id] });
+
+            for (const item of items) {
+                // Tag-sinks are outputs, not source files.
+                if ((item.tags || []).includes(markerTag)) continue;
+
+                const ext = String(item.ext || '').trim().toLowerCase().replace(/^\./, '');
+                if (!ext) continue;
+
+                const newTags = new Set(item.tags || []);
+                const hadTag = newTags.has(ext);
+                newTags.add(ext);
+                fileTypes.add(ext);
+
+                if (!hadTag) {
+                    item.tags = [...newTags];
+                    await item.save();
+                    taggedFileCount++;
+                }
+            }
         }
 
-        const fileTypes = new Set();
-        items.forEach((item) => {
-            if (item.tags.includes(markerTag)) return;
-            const ext = String(item.ext || '').trim().toLowerCase().replace(/^\./, '');
-            if (ext) fileTypes.add(ext);
-        });
+        await refreshFolderImpl();
 
         if (fileTypes.size === 0) {
             setStatus('No file extensions found to add.', 'ok');
             await showNotification(
                 'Tag Sink',
-                `No file extensions found in "${currentFolder.name}".`,
+                recursive
+                    ? `No file extensions found in the folder tree rooted at "${currentFolder.name}".`
+                    : `No file extensions found in "${currentFolder.name}".`,
                 false
             );
             return;
         }
 
-        for (const sink of sinks) {
-            const newTags = new Set(sink.tags || []);
-            fileTypes.forEach((ext) => newTags.add(ext));
-            newTags.add(markerTag);
-            sink.tags = [...newTags];
-            await sink.save();
-        }
-
-        await refreshFolderImpl();
-
-        const plural = sinks.length === 1 ? '' : 's';
+        const scope = recursive ? 'the folder tree' : 'the selected folder';
         const message =
-            `Added ${fileTypes.size} file-type tag(s) to ${sinks.length} tag-sink file${plural}: ` +
+            `Added file-type tags to ${taggedFileCount} file${taggedFileCount === 1 ? '' : 's'} in ${scope}: ` +
             [...fileTypes].sort().join(', ');
-        setStatus(`Added ${fileTypes.size} file-type tag(s) to the tag-sink.`, 'ok');
+        setStatus(`Added file-type tags to ${taggedFileCount} file${taggedFileCount === 1 ? '' : 's'}.`, 'ok');
         await showNotification('Tag Sink', message, false);
         await closeWindowIfConfigured();
     } catch (err) {
@@ -254,6 +347,17 @@ async function addFileTypesToSink() {
     }
 }
 
+// Return the selected folder and all descendants in traversal order.
+// This is used by file-type tagging when recursive mode is enabled.
+function getFolderTreeList(folder) {
+    const result = [folder];
+    const children = Array.isArray(folder.children) ? folder.children : [];
+    for (const child of children) {
+        result.push(...getFolderTreeList(child));
+    }
+    return result;
+}
+
 // ---- The main action: compute the tag union and write it to the sink --
 async function syncTags() {
     await pluginReadyPromise;
@@ -264,48 +368,39 @@ async function syncTags() {
     }
 
     const markerTag = getMarkerTag();
-    setStatus('Syncing…');
+    const recursive = getRecursive();
+    setStatus(recursive ? 'Syncing folder tree…' : 'Syncing…');
     if ($('syncBtn')) $('syncBtn').disabled = true;
 
     try {
-        // Re-fetch fresh data in case tags changed since the last refresh.
-        const items = await eagle.item.get({ folders: [currentFolder.id] });
-
-        const existingSinks = items.filter((item) => item.tags.includes(markerTag));
-
-        // Build the union of every tag used anywhere in the folder, other
-        // than the marker tag itself.
-        const unionTags = new Set();
-        items.forEach((item) => {
-            item.tags.forEach((tag) => {
-                if (tag !== markerTag) unionTags.add(tag);
-            });
-        });
-        const finalTags = [...unionTags, markerTag];
-
-        let message;
-
-        if (existingSinks.length === 0) {
-            const filePath = createPlaceholderImageFile('tag-sink');
-            await eagle.item.addFromPath(filePath, {
-                name: 'tag-sink',
-                tags: finalTags,
-                folders: [currentFolder.id],
-                annotation: 'Auto-created by the Tag Sink plugin.',
-            });
-            message = `Created tag-sink in "${currentFolder.name}" with ${unionTags.size} tag(s).`;
-            setStatus(`Created a new tag-sink file with ${unionTags.size} tag(s).`, 'ok');
+        let results;
+        if (recursive) {
+            results = [];
+            await syncFolderTree(currentFolder, markerTag, results);
         } else {
-            for (const sink of existingSinks) {
-                sink.tags = finalTags;
-                await sink.save();
-            }
-            const plural = existingSinks.length === 1 ? '' : 's';
-            message = `Synced ${unionTags.size} tag(s) to ${existingSinks.length} tag-sink file${plural} in "${currentFolder.name}".`;
-            setStatus(`Synced ${unionTags.size} tag(s) to ${existingSinks.length} tag-sink file${plural}.`, 'ok');
+            results = [await syncOneFolder(currentFolder, markerTag)];
         }
 
+        // Refresh the selected folder only; Eagle's normal folder view can
+        // then be used to inspect any child folder's own sink.
         await refreshFolderImpl();
+
+        if (!recursive) {
+            const result = results[0];
+            const message = result.sinks.length === 0
+                ? `No tag-sink was created in "${result.folder.name}".`
+                : `Synced ${result.tagCount} tag(s) to ${result.sinks.length} tag-sink file${result.sinks.length === 1 ? '' : 's'} in "${result.folder.name}".`;
+            setStatus(`Synced ${result.tagCount} tag(s) to the tag-sink.`, 'ok');
+            await showNotification('Tag Sink', message, false);
+        } else {
+            const created = results.filter((r) => r.createdSink).length;
+            const total = results.length;
+            const rootResult = results.find((r) => r.folder.id === currentFolder.id);
+            const message = `Synced ${total} folder${total === 1 ? '' : 's'} in the tree rooted at "${currentFolder.name}". The parent sink includes tags from all descendant folders.`;
+            setStatus(`Synced ${total} folder${total === 1 ? '' : 's'} recursively (${created} with a tag-sink).`, 'ok');
+            await showNotification('Tag Sink', message, false);
+        }
+
         await closeWindowIfConfigured();
     } catch (err) {
         console.error(err);
@@ -350,6 +445,7 @@ async function closeWindowIfConfigured() {
 function initUI() {
     $('markerTagInput').value = getMarkerTag();
     $('autoCloseCheckbox').checked = getAutoClose();
+    $('recursiveCheckbox').checked = getRecursive();
 
     $('refreshBtn').addEventListener('click', refreshFolder);
     $('syncBtn').addEventListener('click', syncTags);
@@ -360,6 +456,16 @@ function initUI() {
         $('markerTagInput').value = getMarkerTag();
         setStatus(`Marker tag set to "${getMarkerTag()}".`, 'ok');
         renderItemList(currentItems);
+    });
+
+    $('recursiveCheckbox').addEventListener('change', () => {
+        setRecursive($('recursiveCheckbox').checked);
+        setStatus(
+            getRecursive()
+                ? 'Recursive sync is enabled: child folders will get their own tag-sinks, and parent sinks will include descendant tags.'
+                : 'Recursive sync is disabled: only the selected folder will be synchronized.',
+            'ok'
+        );
     });
 
     $('autoCloseCheckbox').addEventListener('change', () => {
