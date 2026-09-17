@@ -172,6 +172,11 @@
                 <button id="saveMarkerBtn">Save</button>
             </div>
             <div class="settings-row">
+                <label for="contextTagInput">Context image tag</label>
+                <input type="text" id="contextTagInput" spellcheck="false" placeholder="context-image">
+                <button id="saveContextTagBtn">Save</button>
+            </div>
+            <div class="settings-row">
                 <label for="recursiveCheckbox">Include subdirectories</label>
                 <input type="checkbox" id="recursiveCheckbox">
             </div>
@@ -184,7 +189,7 @@
                 Apply it to a file (any file) in Eagle the normal way, and Sync will
                 aggregate every other tag in the folder onto that file. If no file in
                 the folder has this tag, Sync creates a small blank placeholder image
-                and applies it there. Use "Add File Types to Files" separately to add each file extension (such as csv, xlsx, or pdf) as a tag. If "Include subdirectories" is enabled, Sync walks all descendants, creates a tag-sink in folders that lack one, syncs children first, and then gives the parent sink the union of tags from the entire subtree.
+                and applies it there. Use "Add File Types to Files" separately to add each file extension (such as csv, xlsx, or pdf) as a tag. If "Include subdirectories" is enabled, Sync walks all descendants, creates a tag-sink in folders that lack one, syncs children first, and then gives the parent sink the union of tags from the entire subtree. When a new sink is needed, the plugin uses a uniquely context-marked image, then an image whose filename matches the folder name, then the folder's only image if there is exactly one; otherwise it creates a blank placeholder. The sink is also named after its folder. When a new sink is needed, the plugin uses a uniquely context-marked image, then an image whose filename matches the folder name, then the folder's only image if there is exactly one; otherwise it creates a blank placeholder.
             </div>
         </details>
     </footer>

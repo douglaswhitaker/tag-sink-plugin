@@ -48,7 +48,9 @@ const path = require('path');
 const MARKER_TAG_STORAGE_KEY = 'tagsink.markerTag';
 const AUTO_CLOSE_STORAGE_KEY = 'tagsink.autoClose';
 const RECURSIVE_STORAGE_KEY = 'tagsink.recursive';
+const CONTEXT_TAG_STORAGE_KEY = 'tagsink.contextTag';
 const DEFAULT_MARKER_TAG = 'tag-sink';
+const DEFAULT_CONTEXT_TAG = 'context-image';
 const DEFAULT_AUTO_CLOSE = false;
 const DEFAULT_RECURSIVE = false;
 
@@ -75,6 +77,15 @@ function getRecursive() {
 
 function setRecursive(value) {
     localStorage.setItem(RECURSIVE_STORAGE_KEY, value ? 'true' : 'false');
+}
+
+function getContextTag() {
+    return localStorage.getItem(CONTEXT_TAG_STORAGE_KEY) || DEFAULT_CONTEXT_TAG;
+}
+
+function setContextTag(value) {
+    const cleaned = (value || '').trim();
+    localStorage.setItem(CONTEXT_TAG_STORAGE_KEY, cleaned);
 }
 
 // ---- Small DOM helpers ------------------------------------------------
@@ -139,13 +150,18 @@ async function syncOneFolder(folder, markerTag, childTagSets = []) {
     let createdSink = false;
 
     if (sinks.length === 0) {
-        const filePath = createPlaceholderImageFile(folder.name || 'tag-sink');
-        await eagle.item.addFromPath(filePath, {
-            name: 'tag-sink',
-            tags: [markerTag],
-            folders: [folder.id],
-            annotation: 'Auto-created by the Tag Sink plugin.',
-        });
+        const contextImage = findContextImage(items, folder);
+        if (contextImage) {
+            await createSinkFromContextImage(contextImage, folder, markerTag);
+        } else {
+            const filePath = createPlaceholderImageFile(folder.name || 'tag-sink');
+            await eagle.item.addFromPath(filePath, {
+                name: folder.name || 'tag-sink',
+                tags: [markerTag],
+                folders: [folder.id],
+                annotation: 'Auto-created by the Tag Sink plugin.',
+            });
+        }
         createdSink = true;
         items = await eagle.item.get({ folders: [folder.id] });
         sinks = items.filter((item) => (item.tags || []).includes(markerTag));
@@ -161,6 +177,9 @@ async function syncOneFolder(folder, markerTag, childTagSets = []) {
     const finalTags = [...unionTags, markerTag];
 
     for (const sink of sinks) {
+        // The sink represents the dataset/folder, so keep its visible name
+        // synchronized with the folder name as well as its tags.
+        sink.name = folder.name || sink.name || 'tag-sink';
         sink.tags = finalTags;
         await sink.save();
     }
@@ -265,6 +284,55 @@ function createPlaceholderImageFile(baseName) {
     const tmpPath = path.join(os.tmpdir(), `${safeName}-${Date.now()}.png`);
     fs.writeFileSync(tmpPath, buffer);
     return tmpPath;
+}
+
+// Find an optional context image to use as the visual for a newly-created
+// sink. The order is deliberately conservative: an explicitly marked image
+// wins; then an image whose base filename matches the folder; finally, if the
+// folder contains exactly one image, use that. If several images exist and
+// none is identified, the plugin falls back to the blank placeholder.
+function findContextImage(items, folder) {
+    const imageExts = new Set([
+        'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'svg', 'heic', 'avif'
+    ]);
+    const images = items.filter((item) => imageExts.has(String(item.ext || '').toLowerCase().replace(/^\./, '')));
+    if (images.length === 0) return null;
+
+    const contextTag = getContextTag();
+    if (contextTag) {
+        const tagged = images.filter((item) => (item.tags || []).includes(contextTag));
+        if (tagged.length === 1) return tagged[0];
+    }
+
+    const folderName = String(folder.name || '').trim().toLowerCase();
+    if (folderName) {
+        const matchingName = images.filter((item) => {
+            const name = String(item.name || '').trim();
+            const base = name.replace(/\.[^.]+$/, '').toLowerCase();
+            return base === folderName;
+        });
+        if (matchingName.length === 1) return matchingName[0];
+    }
+
+    return images.length === 1 ? images[0] : null;
+}
+
+async function createSinkFromContextImage(contextImage, folder, markerTag) {
+    const ext = String(contextImage.ext || 'jpg').toLowerCase().replace(/^\./, '') || 'jpg';
+    const safeName = (folder.name || 'tag-sink').replace(/[\\/:*?"<>|]/g, '_');
+    const tmpPath = path.join(os.tmpdir(), `${safeName}-${Date.now()}.${ext}`);
+    fs.copyFileSync(contextImage.filePath, tmpPath);
+
+    const sourceTags = (contextImage.tags || []).filter((tag) => tag !== markerTag);
+    const itemId = await eagle.item.addFromPath(tmpPath, {
+        name: folder.name || 'tag-sink',
+        tags: [...new Set([...sourceTags, markerTag])],
+        folders: [folder.id],
+        annotation: `Tag-sink created from context image: ${contextImage.name}`,
+    });
+
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    return itemId;
 }
 
 // ---- File-type tagging ---------------------------------------------------
