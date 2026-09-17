@@ -46,7 +46,9 @@ const path = require('path');
 // localStorage here is just this plugin window's own local storage; it
 // persists between plugin launches on this machine.
 const MARKER_TAG_STORAGE_KEY = 'tagsink.markerTag';
+const AUTO_CLOSE_STORAGE_KEY = 'tagsink.autoClose';
 const DEFAULT_MARKER_TAG = 'tag-sink';
+const DEFAULT_AUTO_CLOSE = false;
 
 function getMarkerTag() {
     return localStorage.getItem(MARKER_TAG_STORAGE_KEY) || DEFAULT_MARKER_TAG;
@@ -55,6 +57,14 @@ function getMarkerTag() {
 function setMarkerTag(value) {
     const cleaned = (value || '').trim();
     localStorage.setItem(MARKER_TAG_STORAGE_KEY, cleaned || DEFAULT_MARKER_TAG);
+}
+
+function getAutoClose() {
+    return localStorage.getItem(AUTO_CLOSE_STORAGE_KEY) === 'true';
+}
+
+function setAutoClose(value) {
+    localStorage.setItem(AUTO_CLOSE_STORAGE_KEY, value ? 'true' : 'false');
 }
 
 // ---- Small DOM helpers ------------------------------------------------
@@ -119,10 +129,6 @@ async function refreshFolderImpl() {
 // Public refresh entry point. If plugin-show or a button click happens
 // before plugin-create has finished, wait until Eagle's plugin API is ready.
 async function refreshFolder() {
-    await pluginReady;
-    return refreshFolderImpl();
-}
-async function refreshFolder() {
     await pluginReadyPromise;
     return refreshFolderImpl();
 }
@@ -171,37 +177,89 @@ function createPlaceholderImageFile(baseName) {
     return tmpPath;
 }
 
-// ---- The main action: compute the tag union and write it to the sink --
-async function syncTags(options = {}) {
-    const fromShortcut = options.fromShortcut === true;
-
-    // A shortcut can be invoked before onPluginCreate has completed.
+// ---- File-type tagging ---------------------------------------------------
+// Eagle exposes the file extension as `item.ext`. We use the extension itself
+// as a tag, e.g. "csv", "xlsx", "pdf". The tag-sink's own extension is not
+// included.
+async function addFileTypesToSink() {
     await pluginReadyPromise;
 
-    // Always obtain the currently selected folder for a shortcut invocation.
-    // This avoids relying on stale UI state when switching between datasets.
-    if (fromShortcut) {
-        const folders = await eagle.folder.getSelected();
-        if (!folders || folders.length === 0) {
+    const folders = await eagle.folder.getSelected();
+    if (!folders || folders.length === 0) {
+        setStatus('Select a folder in Eagle first.', 'err');
+        await showNotification('Tag Sink', 'No Eagle folder is selected.', true);
+        return;
+    }
+    currentFolder = folders[0];
+
+    const markerTag = getMarkerTag();
+    setStatus('Adding file-type tags…');
+    if ($('fileTypeBtn')) $('fileTypeBtn').disabled = true;
+
+    try {
+        const items = await eagle.item.get({ folders: [currentFolder.id] });
+        const sinks = items.filter((item) => item.tags.includes(markerTag));
+
+        if (sinks.length === 0) {
+            setStatus('No tag-sink found. Run "Sync Tags to Tag-Sink" first.', 'err');
             await showNotification(
                 'Tag Sink',
-                'No Eagle folder is selected.',
+                'No tag-sink found. Run a normal tag sync first.',
                 true
             );
             return;
         }
-        currentFolder = folders[0];
+
+        const fileTypes = new Set();
+        items.forEach((item) => {
+            if (item.tags.includes(markerTag)) return;
+            const ext = String(item.ext || '').trim().toLowerCase().replace(/^\./, '');
+            if (ext) fileTypes.add(ext);
+        });
+
+        if (fileTypes.size === 0) {
+            setStatus('No file extensions found to add.', 'ok');
+            await showNotification(
+                'Tag Sink',
+                `No file extensions found in "${currentFolder.name}".`,
+                false
+            );
+            return;
+        }
+
+        for (const sink of sinks) {
+            const newTags = new Set(sink.tags || []);
+            fileTypes.forEach((ext) => newTags.add(ext));
+            newTags.add(markerTag);
+            sink.tags = [...newTags];
+            await sink.save();
+        }
+
+        await refreshFolderImpl();
+
+        const plural = sinks.length === 1 ? '' : 's';
+        const message =
+            `Added ${fileTypes.size} file-type tag(s) to ${sinks.length} tag-sink file${plural}: ` +
+            [...fileTypes].sort().join(', ');
+        setStatus(`Added ${fileTypes.size} file-type tag(s) to the tag-sink.`, 'ok');
+        await showNotification('Tag Sink', message, false);
+        await closeWindowIfConfigured();
+    } catch (err) {
+        console.error(err);
+        setStatus('File-type tagging failed — see DevTools console (F12).', 'err');
+        const detail = err && err.message ? ` ${err.message}` : '';
+        await showNotification('Tag Sink — Error', `File-type tagging failed.${detail}`, true);
+    } finally {
+        if ($('fileTypeBtn')) $('fileTypeBtn').disabled = false;
     }
+}
+
+// ---- The main action: compute the tag union and write it to the sink --
+async function syncTags() {
+    await pluginReadyPromise;
 
     if (!currentFolder) {
         setStatus('Select a folder in Eagle first, then click Refresh.', 'err');
-        if (fromShortcut) {
-            await showNotification(
-                'Tag Sink',
-                'No Eagle folder is selected.',
-                true
-            );
-        }
         return;
     }
 
@@ -247,20 +305,13 @@ async function syncTags(options = {}) {
             setStatus(`Synced ${unionTags.size} tag(s) to ${existingSinks.length} tag-sink file${plural}.`, 'ok');
         }
 
-        // Refresh the visible UI when it is open. The shortcut itself does
-        // not depend on this refresh.
         await refreshFolderImpl();
-
-        if (fromShortcut) {
-            await showNotification('Tag Sink', message, false);
-        }
+        await closeWindowIfConfigured();
     } catch (err) {
         console.error(err);
         setStatus('Sync failed — see DevTools console (F12) for details.', 'err');
-        if (fromShortcut) {
-            const detail = err && err.message ? ` ${err.message}` : '';
-            await showNotification('Tag Sink — Error', `Sync failed.${detail}`, true);
-        }
+        const detail = err && err.message ? ` ${err.message}` : '';
+        await showNotification('Tag Sink — Error', `Sync failed.${detail}`, true);
     } finally {
         if ($('syncBtn')) $('syncBtn').disabled = false;
     }
@@ -283,18 +334,42 @@ async function showNotification(title, body, isError = false) {
     }
 }
 
+// Optional convenience setting. It is OFF by default. This is deliberately
+// separate from Eagle's plugin-run/shortcut mechanism: launching the plugin
+// does not perform any action or hide the window.
+async function closeWindowIfConfigured() {
+    if (!getAutoClose()) return;
+    try {
+        await eagle.window.hide();
+    } catch (err) {
+        console.warn('Could not hide Tag Sink window:', err);
+    }
+}
+
 // ---- Wire up the UI -----------------------------------------------------
 function initUI() {
     $('markerTagInput').value = getMarkerTag();
+    $('autoCloseCheckbox').checked = getAutoClose();
 
     $('refreshBtn').addEventListener('click', refreshFolder);
     $('syncBtn').addEventListener('click', syncTags);
+    $('fileTypeBtn').addEventListener('click', addFileTypesToSink);
 
     $('saveMarkerBtn').addEventListener('click', () => {
         setMarkerTag($('markerTagInput').value);
         $('markerTagInput').value = getMarkerTag();
         setStatus(`Marker tag set to "${getMarkerTag()}".`, 'ok');
         renderItemList(currentItems);
+    });
+
+    $('autoCloseCheckbox').addEventListener('change', () => {
+        setAutoClose($('autoCloseCheckbox').checked);
+        setStatus(
+            getAutoClose()
+                ? 'The window will close automatically after a successful operation.'
+                : 'The window will remain open after operations.',
+            'ok'
+        );
     });
 }
 
@@ -316,19 +391,11 @@ eagle.onPluginCreate(async (plugin) => {
     }
 });
 
-// When the plugin is run from Eagle (including its manifest keyboard
-// shortcut), perform the sync without requiring interaction with the window.
-// The notification is the user-facing result and auto-dismisses.
+// The plugin-run event is intentionally not used for background work or
+// keyboard shortcuts. Launching the plugin simply opens the normal UI so it
+// can be inspected and used manually.
 eagle.onPluginRun(async () => {
-    await syncTags({ fromShortcut: true });
-
-    // The shortcut/run action is intended to be background-like. If Eagle
-    // opened the plugin window just to run the action, hide it afterward.
-    try {
-        await eagle.window.hide();
-    } catch (err) {
-        console.warn('Could not hide Tag Sink window after shortcut run:', err);
-    }
+    console.log('Tag Sink launched. Use the window controls to run an operation.');
 });
 
 // When the plugin window is displayed normally, refresh its contents.

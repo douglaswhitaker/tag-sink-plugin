@@ -162,6 +162,7 @@
     <footer>
         <div id="status"></div>
         <button id="syncBtn" class="primary">Sync Tags to Tag-Sink</button>
+        <button id="fileTypeBtn">Add File Types to Tag-Sink</button>
 
         <details>
             <summary>Settings</summary>
@@ -170,12 +171,16 @@
                 <input type="text" id="markerTagInput" spellcheck="false">
                 <button id="saveMarkerBtn">Save</button>
             </div>
+            <div class="settings-row">
+                <label for="autoCloseCheckbox">Close after operation</label>
+                <input type="checkbox" id="autoCloseCheckbox">
+            </div>
             <div class="hint">
                 The marker tag identifies which file is the "tag-sink" for a folder.
                 Apply it to a file (any file) in Eagle the normal way, and Sync will
                 aggregate every other tag in the folder onto that file. If no file in
                 the folder has this tag, Sync creates a small blank placeholder image
-                and applies it there.
+                and applies it there. Use "Add File Types to Tag-Sink" separately to add each file extension (such as csv, xlsx, or pdf) as a tag.
             </div>
         </details>
     </footer>
