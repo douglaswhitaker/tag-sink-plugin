@@ -9,10 +9,10 @@
  * they're all in the same Eagle folder, you land on the whole bundle.
  *
  * HOW THE SINK IS IDENTIFIED
- * Not by filename — by a special "marker tag" (default: "tag-sink"). You
- * apply that tag to whichever file should act as the sink, the normal way
- * you'd apply any tag in Eagle. If you don't have one yet, this plugin will
- * create a tiny blank image and tag it for you.
+ * The root folder uses a special marker tag (default: "tag-sink"). In
+ * recursive mode, sinks in child folders use a separate marker derived from
+ * it (default: "tag-sink-subdir"). This keeps child sinks from appearing as
+ * root dataset sinks in tag searches.
  *
  * SYNC BEHAVIOR
  * Each time you click "Sync", the sink's tags are REPLACED with:
@@ -50,12 +50,17 @@ const AUTO_CLOSE_STORAGE_KEY = 'tagsink.autoClose';
 const RECURSIVE_STORAGE_KEY = 'tagsink.recursive';
 const CONTEXT_TAG_STORAGE_KEY = 'tagsink.contextTag';
 const DEFAULT_MARKER_TAG = 'tag-sink';
+const SUBDIRECTORY_MARKER_SUFFIX = '-subdir';
 const DEFAULT_CONTEXT_TAG = 'context-image';
 const DEFAULT_AUTO_CLOSE = false;
 const DEFAULT_RECURSIVE = false;
 
 function getMarkerTag() {
     return localStorage.getItem(MARKER_TAG_STORAGE_KEY) || DEFAULT_MARKER_TAG;
+}
+
+function getSubdirectoryMarkerTag(markerTag = getMarkerTag()) {
+    return `${markerTag}${SUBDIRECTORY_MARKER_SUFFIX}`;
 }
 
 function setMarkerTag(value) {
@@ -128,15 +133,16 @@ const pluginReadyPromise = new Promise((resolve) => {
 // Eagle exposes each folder's direct children through `folder.children`.
 // Walking the hierarchy this way avoids relying on a second global folder
 // lookup and lets us process each subtree bottom-up in one recursive pass.
-function uniqueTagsFromItems(items, markerTag) {
+function uniqueTagsFromItems(items, markerTags) {
+    const markers = new Set(Array.isArray(markerTags) ? markerTags : [markerTags]);
     const tags = new Set();
     items.forEach((item) => {
         // Sink files are outputs of this plugin, not source files. Excluding
         // them is important: otherwise an old/stale sink tag can never be
         // removed on a later sync.
-        if ((item.tags || []).includes(markerTag)) return;
+        if ((item.tags || []).some((tag) => markers.has(tag))) return;
         (item.tags || []).forEach((tag) => {
-            if (tag !== markerTag) tags.add(tag);
+            if (!markers.has(tag)) tags.add(tag);
         });
     });
     return tags;
@@ -144,20 +150,42 @@ function uniqueTagsFromItems(items, markerTag) {
 
 // Sync one folder from its own files plus the already-computed tag sets of
 // its direct child folders.
-async function syncOneFolder(folder, markerTag, childTagSets = []) {
+async function syncOneFolder(folder, markerTag, sinkMarkerTag, childTagSets = [], isRoot = false) {
     let items = await eagle.item.get({ folders: [folder.id] });
-    let sinks = items.filter((item) => (item.tags || []).includes(markerTag));
+    let sinks = items.filter((item) => (item.tags || []).includes(sinkMarkerTag));
+
+    // 1.3.3 used the root marker for every sink. When upgrading an existing
+    // recursive tree, migrate the old child sink to the new child-specific
+    // marker instead of creating a duplicate. We only do this for folders
+    // below the selected root.
+    if (!isRoot && sinks.length === 0) {
+        const legacySinks = items.filter((item) => (item.tags || []).includes(markerTag));
+        if (legacySinks.length > 0) {
+            // 1.3.3 could create more than one marker-tagged sink in a folder.
+            // Migrate all of them so no old child sink remains marked as the
+            // root sink type.
+            for (const legacySink of legacySinks) {
+                legacySink.tags = [...new Set([
+                    ...(legacySink.tags || []).filter((tag) => tag !== markerTag),
+                    sinkMarkerTag,
+                ])];
+                await legacySink.save();
+            }
+            items = await eagle.item.get({ folders: [folder.id] });
+            sinks = items.filter((item) => (item.tags || []).includes(sinkMarkerTag));
+        }
+    }
     let createdSink = false;
 
     if (sinks.length === 0) {
         const contextImage = findContextImage(items, folder);
         if (contextImage) {
-            await createSinkFromContextImage(contextImage, folder, markerTag);
+            await createSinkFromContextImage(contextImage, folder, sinkMarkerTag);
         } else {
             const filePath = createPlaceholderImageFile(folder.name || 'tag-sink');
             await eagle.item.addFromPath(filePath, {
                 name: folder.name || 'tag-sink',
-                tags: [markerTag],
+                tags: [sinkMarkerTag],
                 folders: [folder.id],
                 annotation: 'Auto-created by the Tag Sink plugin.',
             });
@@ -167,14 +195,14 @@ async function syncOneFolder(folder, markerTag, childTagSets = []) {
         sinks = items.filter((item) => (item.tags || []).includes(markerTag));
     }
 
-    const unionTags = uniqueTagsFromItems(items, markerTag);
+    const unionTags = uniqueTagsFromItems(items, [markerTag, sinkMarkerTag]);
     childTagSets.forEach((tagSet) => {
         tagSet.forEach((tag) => {
-            if (tag !== markerTag) unionTags.add(tag);
+            if (tag !== markerTag && tag !== sinkMarkerTag) unionTags.add(tag);
         });
     });
 
-    const finalTags = [...unionTags, markerTag];
+    const finalTags = [...unionTags, sinkMarkerTag];
 
     for (const sink of sinks) {
         // The sink represents the dataset/folder, so keep its visible name
@@ -198,16 +226,16 @@ async function syncOneFolder(folder, markerTag, childTagSets = []) {
 // first. Each child returns its complete tag set, which is then included in
 // the parent's sink. This is the key behavior: one click on the parent
 // handles every descendant automatically.
-async function syncFolderTree(folder, markerTag, results = []) {
+async function syncFolderTree(folder, markerTag, sinkMarkerTag, results = [], isRoot = true) {
     const children = Array.isArray(folder.children) ? folder.children : [];
     const childResults = [];
 
     for (const child of children) {
-        childResults.push(await syncFolderTree(child, markerTag, results));
+        childResults.push(await syncFolderTree(child, markerTag, sinkMarkerTag, results, false));
     }
 
     const childTagSets = childResults.map((result) => result.tags);
-    const result = await syncOneFolder(folder, markerTag, childTagSets);
+    const result = await syncOneFolder(folder, markerTag, sinkMarkerTag, childTagSets, isRoot);
     results.push(result);
     return result;
 }
@@ -258,8 +286,8 @@ function renderItemList(items) {
     emptyEl.style.display = 'none';
 
     items.forEach((item) => {
-        const isSink = item.tags.includes(markerTag);
-        const visibleTags = item.tags.filter((t) => t !== markerTag);
+        const isSink = item.tags.includes(markerTag) || item.tags.includes(getSubdirectoryMarkerTag(markerTag));
+        const visibleTags = item.tags.filter((t) => t !== markerTag && t !== getSubdirectoryMarkerTag(markerTag));
 
         const row = document.createElement('div');
         row.className = 'item-row' + (isSink ? ' sink' : '');
@@ -352,6 +380,7 @@ async function addFileTypesToSink() {
     currentFolder = folders[0];
 
     const markerTag = getMarkerTag();
+    const sinkMarkerTag = getSubdirectoryMarkerTag(markerTag);
     const recursive = getRecursive();
     setStatus(recursive ? 'Adding file-type tags to files in the folder tree…' : 'Adding file-type tags to files…');
     if ($('fileTypeBtn')) $('fileTypeBtn').disabled = true;
@@ -366,7 +395,7 @@ async function addFileTypesToSink() {
 
             for (const item of items) {
                 // Tag-sinks are outputs, not source files.
-                if ((item.tags || []).includes(markerTag)) continue;
+                if ((item.tags || []).includes(markerTag) || (item.tags || []).includes(sinkMarkerTag)) continue;
 
                 const ext = String(item.ext || '').trim().toLowerCase().replace(/^\./, '');
                 if (!ext) continue;
@@ -437,16 +466,17 @@ async function syncTags() {
 
     const markerTag = getMarkerTag();
     const recursive = getRecursive();
-    setStatus(recursive ? 'Syncing folder tree…' : 'Syncing…');
+    const sinkMarkerTag = recursive ? getSubdirectoryMarkerTag(markerTag) : markerTag;
+    setStatus(recursive ? `Syncing folder tree (subdirectory marker: ${sinkMarkerTag})…` : 'Syncing…');
     if ($('syncBtn')) $('syncBtn').disabled = true;
 
     try {
         let results;
         if (recursive) {
             results = [];
-            await syncFolderTree(currentFolder, markerTag, results);
+            await syncFolderTree(currentFolder, markerTag, sinkMarkerTag, results, true);
         } else {
-            results = [await syncOneFolder(currentFolder, markerTag)];
+            results = [await syncOneFolder(currentFolder, markerTag, markerTag, [], true)];
         }
 
         // Refresh the selected folder only; Eagle's normal folder view can
