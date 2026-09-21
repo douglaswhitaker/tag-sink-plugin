@@ -49,9 +49,15 @@ const MARKER_TAG_STORAGE_KEY = 'tagsink.markerTag';
 const AUTO_CLOSE_STORAGE_KEY = 'tagsink.autoClose';
 const RECURSIVE_STORAGE_KEY = 'tagsink.recursive';
 const CONTEXT_TAG_STORAGE_KEY = 'tagsink.contextTag';
+const SUBDIR_COLORS_STORAGE_KEY = 'tagsink.subdirColors';
 const DEFAULT_MARKER_TAG = 'tag-sink';
 const SUBDIRECTORY_MARKER_SUFFIX = '-subdir';
 const DEFAULT_CONTEXT_TAG = 'context-image';
+const DEFAULT_SUBDIR_COLORS = {
+    'Original Files': { background: '#2F6BFF', text: '#FFFFFF' },
+    'Processed Files': { background: '#2E9E6F', text: '#FFFFFF' },
+    'Background/Supplements': { background: '#8A5CC7', text: '#FFFFFF' },
+};
 const DEFAULT_AUTO_CLOSE = false;
 const DEFAULT_RECURSIVE = false;
 
@@ -91,6 +97,56 @@ function getContextTag() {
 function setContextTag(value) {
     const cleaned = (value || '').trim();
     localStorage.setItem(CONTEXT_TAG_STORAGE_KEY, cleaned);
+}
+
+function getSubdirectoryColors() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(SUBDIR_COLORS_STORAGE_KEY) || '');
+        if (parsed && typeof parsed === 'object') return parsed;
+    } catch (_) {}
+    return { ...DEFAULT_SUBDIR_COLORS };
+}
+
+function setSubdirectoryColors(colors) {
+    localStorage.setItem(SUBDIR_COLORS_STORAGE_KEY, JSON.stringify(colors));
+}
+
+function normalizeHexColor(value, fallback) {
+    const v = String(value || '').trim();
+    return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toUpperCase() : fallback;
+}
+
+function colorForSubdirectory(name) {
+    const colors = getSubdirectoryColors();
+    const exact = Object.keys(colors).find((key) => key.toLowerCase() === String(name || '').trim().toLowerCase());
+    if (exact) {
+        return {
+            background: normalizeHexColor(colors[exact].background, '#4F5968'),
+            text: normalizeHexColor(colors[exact].text, '#FFFFFF'),
+        };
+    }
+
+    // Deterministic pseudo-random hue based on the folder name: an unknown
+    // folder gets a stable colour instead of changing on every sync.
+    let hash = 0;
+    for (const ch of String(name || '')) hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0;
+    const hue = Math.abs(hash) % 360;
+    return { background: hslToHex(hue, 58, 45), text: '#FFFFFF' };
+}
+
+function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    const m = l - c / 2;
+    let r = 0, g = 0, b = 0;
+    if (h < 60) [r,g,b] = [c,x,0];
+    else if (h < 120) [r,g,b] = [x,c,0];
+    else if (h < 180) [r,g,b] = [0,c,x];
+    else if (h < 240) [r,g,b] = [0,x,c];
+    else if (h < 300) [r,g,b] = [x,0,c];
+    else [r,g,b] = [c,0,x];
+    return '#' + [r,g,b].map(v => Math.round((v+m)*255).toString(16).padStart(2,'0')).join('').toUpperCase();
 }
 
 // ---- Small DOM helpers ------------------------------------------------
@@ -178,21 +234,49 @@ async function syncOneFolder(folder, markerTag, sinkMarkerTag, childTagSets = []
     let createdSink = false;
 
     if (sinks.length === 0) {
-        const contextImage = findContextImage(items, folder);
-        if (contextImage) {
-            await createSinkFromContextImage(contextImage, folder, sinkMarkerTag);
+        if (isRoot) {
+            const contextImage = findContextImage(items, folder);
+            if (contextImage) {
+                await createSinkFromContextImage(contextImage, folder, sinkMarkerTag);
+            } else {
+                const filePath = createPlaceholderImageFile(folder.name || 'tag-sink');
+                try {
+                    await eagle.item.addFromPath(filePath, {
+                        name: folder.name || 'tag-sink',
+                        tags: [sinkMarkerTag],
+                        folders: [folder.id],
+                        annotation: 'Auto-created by the Tag Sink plugin.',
+                    });
+                } finally { try { fs.unlinkSync(filePath); } catch (_) {} }
+            }
         } else {
-            const filePath = createPlaceholderImageFile(folder.name || 'tag-sink');
-            await eagle.item.addFromPath(filePath, {
-                name: folder.name || 'tag-sink',
-                tags: [sinkMarkerTag],
-                folders: [folder.id],
-                annotation: 'Auto-created by the Tag Sink plugin.',
-            });
+            const filePath = createSubdirectoryThumbnailFile(folder.name || 'Subdirectory');
+            try {
+                await eagle.item.addFromPath(filePath, {
+                    name: folder.name || 'Subdirectory',
+                    tags: [sinkMarkerTag],
+                    folders: [folder.id],
+                    annotation: 'Auto-created subdirectory tag-sink thumbnail by the Tag Sink plugin.',
+                });
+            } finally { try { fs.unlinkSync(filePath); } catch (_) {} }
         }
         createdSink = true;
         items = await eagle.item.get({ folders: [folder.id] });
-        sinks = items.filter((item) => (item.tags || []).includes(markerTag));
+        sinks = items.filter((item) => (item.tags || []).includes(sinkMarkerTag));
+    }
+
+    // Child sinks are deliberately generated label thumbnails. Replacing the
+    // sink's file preserves its Eagle item/tags while ensuring that a 1x1
+    // placeholder or old context-image sink cannot hijack the subfolder cover.
+    if (!isRoot) {
+        const filePath = createSubdirectoryThumbnailFile(folder.name || 'Subdirectory');
+        try {
+            for (const sink of sinks) {
+                await sink.replaceFile(filePath);
+            }
+        } finally { try { fs.unlinkSync(filePath); } catch (_) {} }
+        items = await eagle.item.get({ folders: [folder.id] });
+        sinks = items.filter((item) => (item.tags || []).includes(sinkMarkerTag));
     }
 
     const unionTags = uniqueTagsFromItems(items, [markerTag, sinkMarkerTag]);
@@ -297,6 +381,59 @@ function renderItemList(items) {
         `;
         listEl.appendChild(row);
     });
+}
+
+// ---- Generated subdirectory thumbnail -----------------------------------
+// Subdirectory sinks are themselves the visual cover: a simple SVG label
+// containing the folder name. SVG is used so the plugin can generate the
+// image with no external image-processing dependency. Eagle imports SVGs as
+// ordinary image items and refreshes their thumbnails when replaceFile() is
+// called.
+function xmlEscape(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function wrapLabel(text, maxChars = 18) {
+    const words = String(text || 'Subdirectory').trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return ['Subdirectory'];
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+        if (word.length > maxChars && !line) {
+            for (let i = 0; i < word.length; i += maxChars) lines.push(word.slice(i, i + maxChars));
+            continue;
+        }
+        const candidate = line ? `${line} ${word}` : word;
+        if (candidate.length <= maxChars) line = candidate;
+        else { lines.push(line); line = word; }
+    }
+    if (line) lines.push(line);
+    return lines.slice(0, 5);
+}
+
+function createSubdirectoryThumbnailFile(folderName) {
+    const { background, text } = colorForSubdirectory(folderName);
+    const lines = wrapLabel(folderName);
+    const safeName = String(folderName || 'Subdirectory').replace(/[\\/:*?"<>|]/g, '_');
+    const tmpPath = path.join(os.tmpdir(), `${safeName}-${Date.now()}-tag-sink.svg`);
+    const lineHeight = 72;
+    const startY = 400 - ((lines.length - 1) * lineHeight) / 2;
+    const textNodes = lines.map((line, i) =>
+        `<text x="400" y="${startY + i * lineHeight}" text-anchor="middle" dominant-baseline="middle" font-family="Arial, Helvetica, sans-serif" font-size="58" font-weight="700" fill="${text}">${xmlEscape(line)}</text>`
+    ).join('\n');
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800">
+<rect width="800" height="800" fill="${background}"/>
+${textNodes}
+</svg>
+`;
+    fs.writeFileSync(tmpPath, svg, 'utf8');
+    return tmpPath;
 }
 
 // ---- Create a tiny blank transparent PNG on disk, for use as a brand
@@ -539,15 +676,62 @@ async function closeWindowIfConfigured() {
     }
 }
 
+function renderSubdirectoryColorSettings() {
+    const wrap = $('subdirColors');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    const colors = getSubdirectoryColors();
+    Object.entries(colors).forEach(([name, value]) => {
+        const row = document.createElement('div');
+        row.className = 'color-row';
+        row.innerHTML = `
+            <input type="text" class="color-name" value="${escapeHtml(name)}" spellcheck="false">
+            <input type="color" class="color-bg" value="${normalizeHexColor(value.background, '#4F5968')}" title="Background">
+            <input type="color" class="color-text" value="${normalizeHexColor(value.text, '#FFFFFF')}" title="Text">
+            <button class="remove-color" type="button">×</button>`;
+        row.querySelector('.remove-color').addEventListener('click', () => {
+            delete colors[name];
+            setSubdirectoryColors(colors);
+            renderSubdirectoryColorSettings();
+        });
+        wrap.appendChild(row);
+    });
+}
+
+function saveSubdirectoryColorSettings() {
+    const colors = {};
+    document.querySelectorAll('#subdirColors .color-row').forEach((row) => {
+        const name = row.querySelector('.color-name').value.trim();
+        if (!name) return;
+        colors[name] = {
+            background: normalizeHexColor(row.querySelector('.color-bg').value, '#4F5968'),
+            text: normalizeHexColor(row.querySelector('.color-text').value, '#FFFFFF'),
+        };
+    });
+    setSubdirectoryColors(colors);
+    setStatus('Subdirectory thumbnail colours saved.', 'ok');
+}
+
 // ---- Wire up the UI -----------------------------------------------------
 function initUI() {
     $('markerTagInput').value = getMarkerTag();
     $('autoCloseCheckbox').checked = getAutoClose();
     $('recursiveCheckbox').checked = getRecursive();
+    renderSubdirectoryColorSettings();
 
     $('refreshBtn').addEventListener('click', refreshFolder);
     $('syncBtn').addEventListener('click', syncTags);
     $('fileTypeBtn').addEventListener('click', addFileTypesToSink);
+    if ($('saveSubdirColorsBtn')) $('saveSubdirColorsBtn').addEventListener('click', saveSubdirectoryColorSettings);
+    if ($('addSubdirColorBtn')) $('addSubdirColorBtn').addEventListener('click', () => {
+        const colors = getSubdirectoryColors();
+        let i = 1;
+        let name = `Subdirectory ${i}`;
+        while (colors[name]) { i += 1; name = `Subdirectory ${i}`; }
+        colors[name] = { background: '#4F5968', text: '#FFFFFF' };
+        setSubdirectoryColors(colors);
+        renderSubdirectoryColorSettings();
+    });
 
     $('saveMarkerBtn').addEventListener('click', () => {
         setMarkerTag($('markerTagInput').value);
