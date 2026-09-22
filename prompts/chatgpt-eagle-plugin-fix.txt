@@ -1,0 +1,356 @@
+Wednesday 12:11 PM
+plugin.js
+JavaScript
+I teach statistics, and I find a lot of datasets that I use for teaching, creating problems/assignments, etc. Even if "the dataset" is one simple CSV file, there are often many files associated with that dataset such as a journal article, a news article, images, assignments I've made based on the dataset, etc. What I really want is a good way of organizing these datasets that includes tags, searchable text, etc. and - this is important - when I search among the datasets I've found, I want the entire collection of files I have for an associated dataset to be the result. For example, some datasets include multiple data files with one data file being information about participants (e.g., demographic information), and another file that contains measurements about the participants at several time points; the information would be linked by participant ID in the analysis. I might have tags A, B, and C for the participant file and C, D, and E for the measurements file because they have different pedagogical uses. These tags can also be for different licenses, because often the data, journal article, supplemental files, etc. are all released under different licenses.
+
+I think I've found a good category of software that might suit my needs: Digital Asset Management software used by designers/creators to catalogue and retrieve assets, but these tend to lack the bundling features I need. I've spent a lot of time looking at the Eagle app (Eagle.cool) and I think it almost has what I want, but not quite. It does, however, have a Javascript plugin API with public documentation, so I think the features that I want can be added to the software. 
+
+What I want is a plugin for Eagle that will allow me to have the following workflow when managing a dataset: 
+1) Create a new folder to store the files in.
+2) Add the files to the folder.
+3) Apply tags and other metadata to some/all of the files. 
+4) [Optional] Add an image to the folder to serve as a kind of avatar or context reminder. (I used these in my slides, for example, by placing this image in the corner so that slides across many presentations that use the same dataset have some clear connection. This image is usually one I find online with some free license, but I don't always include an image. I can give this a standardized name, but don't usually at this point.)
+5) Either when I press a button or actively as I'm adding tags, I want every single tag that I use on any file in the folder to be applied to a new file (perhaps called "tag-sink" or something similar). If I create this file - such as by adding an image and naming it "tag-sink.png" or similar - I want this file to be the one to receive all the tags. If I don't supply an image, then a generic file would be fine.
+
+1, 2, 3, and 4 are all currently possible in Eagle without modifications. I used Claude to make a functional plugin for the feature in Step 5, but there's a launch error I want you to correct.
+
+Here is an error when launching the window. Based on the message I suspect it is because the plugin hasn't actually been bundled as a plugin yet, but I wanted to share it so you can diagnose and correct if necessary.
+
+/Applications/Eagle.app/Contents/Resources/app.asar/app/js/plugin/model/folder.js:156 Uncaught (in promise) This method can only be used after the plugin-create event is triggered. Please refer to the API Document: https://developer.eagle.cool/plugin-api/api/event#gylpl
+
+Line 156 is the return resolve... line in this block of code:
+
+    static async get (options) {
+        return new Promise(async (resolve, reject) => {
+            let result = await ipcRenderer.r2r(global?.parentID, 'folder.get', options);
+            return resolve(Folder.convert(result));
+        });
+    }
+	
+Claude diagnosed this error: 
+
+Bug #1 — the launch error. You're right that it's timing, not packaging. Eagle fires plugin-show on the very first launch in addition to plugin-create, and they can race — your window's onPluginShow handler (which calls folder.getSelected()) can fire before Eagle has finished wiring up the internals that onPluginCreate unlocks. Since you only saw it at launch and everything else worked, that's exactly this race, not a packaging problem. Fix: make every handler that touches the Eagle API wait on a "ready" signal that only resolves once onPluginCreate has actually finished.
+
+But I used up my credits before the fix could be implemented. Please update plugin.js to address this error.
+
+index.html
+File
+manifest.json
+File
+Here are the other files for the plugin. Please make the changes and package as a zip again.
+
+Yes — your observation confirms that serviceMode was the wrong direction for this particular workflow.
+
+Eagle's documentation explicitly says that a background-service plugin automatically starts when Eagle starts, whereas an ordinary window plugin runs when the user clicks it. So the fact that Tag Sink runs immediately at Eagle startup is expected, not a bug.
+
+More importantly, I don't see evidence in Eagle's current official manifest documentation that main.shortcut is actually a supported manifest property. The documented main properties include things such as url, window dimensions, multiple, and runAfterInstall, but not a keyboard shortcut field.
+
+And onPluginRun isn't a keyboard-shortcut event: Eagle documents it as the event fired when the user clicks the plugin in the plugin panel.
+
+So I think our previous implementation made an incorrect assumption about Eagle's API. I don't want to make another ZIP based on that assumption.
+What I think we should do instead
+
+There are two separate problems:
+
+1. We need a way to invoke the operation from a keyboard shortcut.
+
+Eagle's official Plugin API doesn't appear to provide that as a manifest/plugin feature. We therefore need to determine whether Eagle exposes some other mechanism for global/local shortcuts, or whether this needs to be handled outside the plugin.
+
+2. The actual Tag Sink operation is already suitable for a shortcut.
+
+We can make the core operation completely independent of the plugin window:
+
+    keyboard shortcut → get currently selected Eagle folder → synchronize tags → notification
+
+That's the part we've already essentially built. The question is just what should generate the keyboard event.
+A potentially very good alternative
+
+Because you're on macOS, a tiny external shortcut mechanism could invoke Eagle's local API/plugin functionality without requiring the Tag Sink window to open.
+
+Eagle's current Web API is explicitly designed for external tools and exposes the Eagle library through HTTP while Eagle is running.
+
+That opens up some interesting possibilities, including a tiny macOS Shortcut/AppleScript/Automator action or a small helper application bound to a global keyboard shortcut. The helper could tell Eagle to perform the Tag Sink operation.
+
+However, before I build that, I'd like to verify exactly what Eagle exposes for plugin invocation and whether there is a supported way to invoke a plugin from outside the plugin panel. I don't want to repeat the main.shortcut mistake.
+One other thing I would change
+
+I would revert the plugin to a normal window plugin, not a service plugin. Your original design was actually a better fit: Eagle creates the plugin window only when you ask for it. The window can remain useful for configuration and inspection, while the actual synchronization code can be callable independently.
+
+Eagle's documentation confirms that the normal window-plugin model is the standard model and that it is launched by clicking the plugin.
+
+So, I would not use the 1.2.0 version going forward. The service-mode behavior you're seeing is expected.
+
+If you want, I can investigate Eagle's current API/source/examples specifically for keyboard shortcuts or externally invoking a plugin, and then we can choose the cleanest implementation rather than continuing to guess at manifest properties.
+
+Yes, please investigate different approaches for keyboard shortcuts or other ways to achieve the functionality without manually opening the window.
+
+I dug into Eagle's current documentation and examples, and I think we now have a much clearer picture.
+1. Eagle does support a plugin shortcut
+
+I need to correct my previous conclusion on this point. Eagle's manifest documentation explicitly lists:
+
+    shortcut — plugin shortcut-key configuration
+
+under main. The Japanese version of the current documentation includes it, even though the current English page appears to omit it from the field list.
+
+So our original instinct was right: the shortcut should be implemented in manifest.json, not by making the plugin a background service.
+
+The background-service change was unnecessary and explains the startup behavior you observed. Eagle says explicitly that serviceMode: true causes a plugin to start automatically with Eagle, whereas a normal window plugin starts when the user clicks it.
+
+I would therefore revert that.
+2. The likely problem is the shortcut value
+
+Our previous version used:
+
+"shortcut": "CommandOrControl+Shift+T"
+
+That's the part I'm now suspicious of.
+
+Eagle's documentation calls this a "shortcut key setting", but doesn't document the accepted accelerator syntax on the English page.
+
+And this matters because Eagle is an Electron application, but we shouldn't assume that it accepts Electron's CommandOrControl accelerator syntax here.
+
+Given that you're on macOS, I think the first thing I'd test is the native macOS form:
+
+"shortcut": "Command+Shift+T"
+
+rather than:
+
+"shortcut": "CommandOrControl+Shift+T"
+
+That is a much more targeted experiment than the service-plugin detour.
+3. onPluginRun is actually exactly what we want
+
+This part of our implementation was sound.
+
+Eagle says:
+
+    onPluginRun(callback) — when the user clicks the plugin in the plugin panel, Eagle calls this method.
+
+The important implication is that the shortcut appears to be an alternate way of invoking the plugin, rather than a separate keyboard event that we need to catch ourselves.
+
+So the intended architecture appears to be:
+
+                   ┌── click plugin ──────┐
+                   │                      ↓
+Eagle ── invokes plugin ─────────────── onPluginRun()
+                   │                      ↓
+                   └── keyboard shortcut ┘
+                                          ↓
+                                   sync tag sink
+                                          ↓
+                                   notification
+
+That's exactly the architecture we want.
+4. There's an even better possibility: Eagle's built-in shortcut system
+
+I also found an Eagle feature that may be relevant to your workflow.
+
+Eagle itself has an Action system for creating shortcuts. Eagle's own documentation/blog describes creating shortcuts with Action, and gives examples of built-in shortcuts such as Command+Shift+C for Copy Tags.
+
+This raises an important possibility:
+
+Rather than trying to make the plugin itself own the global shortcut, we may be able to have Eagle's Action system invoke the plugin.
+
+That would potentially be preferable because:
+
+    Eagle owns the keyboard shortcut.
+
+    You can change the shortcut from Eagle rather than editing manifest.json.
+
+    Eagle handles shortcut conflicts.
+
+    The plugin remains an ordinary window plugin.
+
+    The shortcut can potentially invoke the plugin's normal onPluginRun.
+
+    We don't need any external automation software.
+
+I haven't found sufficiently clear current documentation showing that an installed plugin can be assigned as an Action target, though, so I don't want to claim that this works yet.
+5. An external macOS shortcut is a very viable fallback
+
+There is another approach that I'm now considerably more confident about than I was before.
+
+Eagle 4 has a local Web API running on port 41595. It is explicitly intended for external tools, scripts, browser extensions, and automation. It can manipulate items, folders, and tags.
+
+That means we could build:
+
+⌘⇧T
+   ↓
+macOS shortcut / launcher
+   ↓
+Eagle Web API
+   ↓
+find selected folder
+   ↓
+calculate tag union
+   ↓
+update tag-sink
+   ↓
+notification
+
+This would have one major advantage:
+
+The keyboard shortcut would not depend on the Eagle plugin system at all.
+
+For example, a tiny macOS Shortcut, Raycast command, Alfred workflow, Keyboard Maestro macro, or small shell/Node script could invoke it.
+
+The Web API is explicitly local; requests from the same machine don't require authentication, and Eagle starts the API server when Eagle is running.
+
+There is one catch: we'd need to determine whether the Web API exposes the currently selected folder. The API clearly exposes item/folder operations, but I haven't yet established that the current UI selection is exposed through Web API. The Plugin API does have eagle.item.getSelected() and folder-selection functionality, so the plugin has an advantage there.
+My recommended order of attack
+
+I'd proceed in this order:
+A. Fix the Eagle plugin itself first
+
+Return to a normal window plugin and change:
+
+"shortcut": "CommandOrControl+Shift+T"
+
+to:
+
+"shortcut": "Command+Shift+T"
+
+and remove:
+
+"serviceMode": true
+
+Then have the shortcut invoke the existing onPluginRun synchronization code.
+
+This is the smallest change and is the approach most directly supported by Eagle's Plugin API.
+B. If that doesn't work, investigate Eagle's Action system
+
+If Eagle has a way to assign an Action to an installed plugin, that could be an even nicer solution.
+C. If Eagle's plugin shortcut mechanism proves unreliable, use a macOS launcher
+
+At that point I'd seriously consider a small Keyboard Maestro / Alfred / Raycast / macOS Shortcut workflow talking to Eagle's Web API.
+
+That would actually give you a more powerful long-term architecture: the Tag Sink operation becomes a standalone command that can eventually be invoked from multiple places, not just Eagle's plugin window.
+One other useful discovery
+
+The current Eagle API is quite capable. The Web API V2 includes folder management, item modification, tag management, full-text search, etc., and the Plugin API has direct access to selected items and their folders.
+
+So the actual Tag Sink functionality isn't the hard part anymore. We have a working implementation of that. The remaining problem is finding the cleanest invocation mechanism.
+
+And I think the evidence now strongly favors returning to an ordinary window plugin and fixing the shortcut declaration, rather than trying to keep the background-service approach.
+
+If you'd like, I can make
+a 1.3.0 test ZIP that does exactly that—normal window plugin, no serviceMode, Command+Shift+T, and otherwise leave the working Tag Sink code alone. That would give us a very clean test of whether Eagle's native plugin shortcut mechanism is the missing piece.
+
+I went back to 1.1.0 and made those changes, and the keyboard shortcut doesn't work. I think that the fact the shortcut API info is only present in the Japanese documentation suggests that it isn't a currently supported feature. 
+
+I think your interpretation is correct, and the new evidence makes me substantially more confident about it.
+
+I checked the current Eagle documentation in all three available language versions. The situation is quite telling:
+
+    The current English manifest.json documentation lists the supported main fields and does not include shortcut.
+
+    The Japanese version does contain "shortcut": "" and describes it as the plugin shortcut setting.
+
+    The Chinese version, which is another official translation of the documentation, also does not appear to document shortcut among the fields.
+
+    The current API documentation describes onPluginRun specifically as firing when the user clicks the plugin in the plugin panel. It does not describe a keyboard invocation mechanism.
+
+    Eagle's current overview describes Window Plugins as being executed when the user clicks them, while Background Service Plugins automatically start with Eagle.
+
+So I agree: I would no longer treat main.shortcut as a supported Eagle feature. The fact that it exists in one language version but not the English or Chinese documentation looks much more like a documentation artifact, obsolete/unfinished feature, or unsupported feature than something we should build around.
+
+And your experiment is strong practical evidence: you tried it and it didn't work.
+I would stop trying to make the Eagle plugin itself handle the shortcut
+
+The good news is that I think we have a better route.
+The promising solution: a tiny external launcher
+
+Eagle explicitly provides a local Web API for external tools, scripts, and automation. That's different from the Plugin API: the Web API runs outside Eagle and communicates with it over HTTP.
+
+That means we can separate the two jobs:
+
+Tag Sink Eagle plugin
+
+    Does all the complicated Eagle-specific work.
+
+    Remains a normal window plugin.
+
+    Can still be opened manually when you want to inspect/configure things.
+
+Keyboard shortcut helper
+
+    Lives outside Eagle.
+
+    Registers a macOS keyboard shortcut.
+
+    Tells Eagle to perform the Tag Sink operation.
+
+    Displays a transient success/error notification.
+
+    Never opens the Tag Sink window.
+
+The remaining technical question is how the external helper determines which Eagle folder is currently selected.
+
+That's the part I would investigate next rather than guessing.
+There are two possible designs
+
+A. External helper talks directly to Eagle's Web API
+
+Something like:
+
+⌘⇧T
+   ↓
+tiny macOS helper
+   ↓
+Eagle Web API
+   ↓
+currently selected folder?
+   ↓
+files in folder
+   ↓
+tag union
+   ↓
+tag-sink
+
+This would be the cleanest solution if Eagle's Web API exposes the current selection.
+
+B. External helper invokes the plugin
+
+If Eagle has some undocumented/internal way of launching a particular plugin, we could instead have:
+
+⌘⇧T
+   ↓
+macOS helper
+   ↓
+tell Eagle "run Tag Sink"
+   ↓
+onPluginRun()
+   ↓
+sync
+
+But I haven't found evidence in the official documentation that such an external plugin invocation API exists, so I wouldn't build around it without further evidence.
+There's also a very interesting possibility for your particular Mac workflow
+
+Because the helper only needs to perform one action, it doesn't necessarily need to be a full application.
+
+We could potentially make this a macOS Shortcut or Raycast/Alfred/Keyboard Maestro action, depending on what you already use.
+
+For example, the ideal user experience would be:
+
+    Select dataset folder in Eagle → ⌘⇧T → notification says “Tag Sink: 14 tags synchronized.”
+
+No window. No dialog. No mouse movement.
+
+And importantly, the Tag Sink plugin itself can remain exactly as the useful visual/configuration interface. We're just giving the underlying operation another entry point.
+One thing I would not do
+
+I wouldn't make the plugin a background service again.
+
+Eagle's documentation is explicit that background services start automatically with Eagle and remain running in the background. That's exactly the behavior you observed with 1.2.0, and it isn't what you want.
+
+So I'd regard 1.1.0's normal window-plugin architecture as the correct base.
+My next step
+
+I'd investigate the Eagle Web API's folder/item-selection capabilities specifically, and also check Eagle's official plugin examples/GitHub repository for any mechanism that isn't obvious from the API documentation.
+
+If the Web API can't expose selection, there may still be a very workable macOS-level solution—for example, using the currently focused Eagle window and an automation mechanism to invoke the plugin or extract the selection.
+
+I think that's now the right problem to solve, rather than spending more time trying different values for manifest.json's shortcut field.
+
+

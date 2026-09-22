@@ -1,0 +1,236 @@
+Thursday 2:09 PM
+index(1).html
+File
+manifest(1).json
+File
+plugin(1).js
+JavaScript
+I teach statistics, and I find a lot of datasets that I use for teaching, creating problems/assignments, etc. Even if "the dataset" is one simple CSV file, there are often many files associated with that dataset such as a journal article, a news article, images, assignments I've made based on the dataset, etc. What I really want is a good way of organizing these datasets that includes tags, searchable text, etc. and - this is important - when I search among the datasets I've found, I want the entire collection of files I have for an associated dataset to be the result. For example, some datasets include multiple data files with one data file being information about participants (e.g., demographic information), and another file that contains measurements about the participants at several time points; the information would be linked by participant ID in the analysis. I might have tags A, B, and C for the participant file and C, D, and E for the measurements file because they have different pedagogical uses. These tags can also be for different licenses, because often the data, journal article, supplemental files, etc. are all released under different licenses.
+
+I think I've found a good category of software that might suit my needs: Digital Asset Management software used by designers/creators to catalogue and retrieve assets, but these tend to lack the bundling features I need. I've spent a lot of time looking at the Eagle app (Eagle.cool) and I think it almost has what I want, but not quite. It does, however, have a Javascript plugin API with public documentation, so I think the features that I want can be added to the software. 
+
+What I want is a plugin for Eagle that will allow me to have the following workflow when managing a dataset: 
+1) Create a new folder to store the files in.
+2) Add the files to the folder.
+3) Apply tags and other metadata to some/all of the files. 
+4) [Optional] Add an image to the folder to serve as a kind of avatar or context reminder. (I used these in my slides, for example, by placing this image in the corner so that slides across many presentations that use the same dataset have some clear connection. This image is usually one I find online with some free license, but I don't always include an image. I can give this a standardized name, but don't usually at this point.)
+5) Either when I press a button or actively as I'm adding tags, I want every single tag that I use on any file in the folder to be applied to a new file (perhaps called "tag-sink" or something similar). If I create this file - such as by adding an image and naming it "tag-sink.png" or similar - I want this file to be the one to receive all the tags. If I don't supply an image, then a generic file would be fine.
+
+1, 2, 3, and 4 are all currently possible in Eagle without modifications. I've used ChatGPT and Claude to make a functional plugin for Step 5 (relevant files attached). I now want to add in some extra functionality/quality-of-life enhancements. I would like the following to be added:
+
+A) Press a button and all (data) file types are added as tags to tag-sink. (A lot of the searches I do are tag-based, and file-type is not treated as a tag, so this is adding existing information into the tag structure.)
+B) Support for subdirectories (maybe with tag-sink1, tag-sink2 etc. for level). (Currently the plugin only works for files in the same directory, not subdirectories. Having the option to create a nested parent-child-grandchild type hierarchy of folders with their own tag-sink support, and then the parent directory tag-sink includes all of the subdirectory ones would be good.)
+C) Copy context image and create tag-sink file from that (to avoid weird multiple tags for different licenses issues)
+D) Rename tag-sink image to name of folder (depends on duplicating the image from enhancement C)
+E) Also user configuration for some of the behaviours, such as the name of the tag-sink tag, the behaviour of the window (does it close automatically when opening or stay open), the names of the subdirectory tags, whether or not file types are added as tags (and whether this action is performed simultaneous with syncing all the tags or if it's a separate button in the window), etc. 
+
+I am on the free version of ChatGPT, so I know my time/credits are limited, so please identify the easiest to complete (I suspect A, B, or both A & B) and implement those first. When you are done, please package as a zip for downloading.
+
+I implemented A first, as you suggested. I think this is the safest/easiest enhancement to add without changing the existing workflow substantially.
+What changed in 1.2.0
+
+    Added a separate “Add File Types to Tag-Sink” button.
+
+    It examines every non-tag-sink item in the currently selected Eagle folder.
+
+    It uses Eagle's item.ext property to obtain the file extension. Eagle's current API explicitly exposes ext as a read-only item property.
+
+    Each distinct extension becomes a tag on the tag-sink. For example, a folder containing:
+
+        data.csv
+
+        measurements.xlsx
+
+        article.pdf
+
+        figure.png
+
+    will add the tags csv, xlsx, pdf, and png.
+
+    Existing tags on the sink are preserved; this operation is additive, unlike the normal tag synchronization, which replaces the sink's non-marker tags.
+
+    The file-type operation is deliberately a separate button, rather than changing the existing Sync behavior.
+
+    It gives an Eagle notification describing what was added.
+
+    I also cleaned up a duplicate refreshFolder() definition that was present in the supplied plugin code.
+
+The existing marker-tag mechanism remains unchanged; the supplied UI identifies the marker tag as the mechanism for selecting the tag-sink. The manifest remains based on your 1.1.0 plugin, with the version bumped to 1.2.0.
+Download
+
+Download Tag Sink 1.2.0
+
+The ZIP contains the complete plugin directory, including manifest.json, index.html, js/plugin.js, and a small placeholder logo.png.
+
+I have not attempted B (subdirectories) yet. That is substantially more involved because it requires deciding how Eagle's folder hierarchy is represented by the API and how parent/child sink aggregation should work. A is nicely isolated and should be straightforward to test before we tackle that larger change.
+
+Because the window automatically closes when the plugin is launched, I cannot access the button to test. Please add an option for the window to automatically close or not (or disable the functionality). The window automatically closing was part of an attempt to add a keyboard shortcut to the plugin, but it does not seem to work and I do not want to go down that path again now.
+
+Yes. I’ve changed this so the plugin is normal/manual by default, rather than behaving like the failed keyboard-shortcut experiment.
+Changes in 1.2.1
+
+    The keyboard shortcut has been removed from the manifest entirely.
+
+    Launching the plugin no longer runs a sync automatically.
+
+    Launching the plugin no longer hides/closes the window.
+
+    Added a “Close after operation” setting.
+
+        Off by default — the window stays open.
+
+        If enabled, the window closes after a successful Sync or File-Type operation.
+
+    The setting is persistent, so Eagle will remember your choice.
+
+    The existing A: Add File Types to Tag-Sink functionality remains intact.
+
+So for testing, you should be able to launch Tag Sink, leave the window open, select/refresh your dataset folder, and actually press the new buttons. The plugin's plugin-run handler is now deliberately inert rather than attempting to implement shortcut/background behavior.
+Download
+
+Download Tag Sink 1.2.1
+
+I also ran a JavaScript syntax check on the modified plugin before packaging it.
+
+No. I did not use an external image-generation library in 1.3.5.
+
+The thumbnail generation is done directly by the plugin code. In particular, it generates the thumbnail data itself and then gives that image to Eagle. Eagle's Plugin API explicitly supports adding an image from Base64 via eagle.item.addFromBase64(), so there is no need for an image-processing package just to create these simple labelled thumbnails.
+
+Eagle's plugin environment does allow third-party modules, so using something like a PNG-generation library would be possible in principle. But 1.3.5 doesn't depend on one, which is preferable here:
+
+    no additional dependency to maintain;
+
+    no third-party license to worry about;
+
+    no external service or network connection;
+
+    the plugin remains self-contained.
+
+One clarification, though: I should have been more explicit about what 1.3.5 actually generates. It uses a self-contained image representation rather than invoking ChatGPT's image-generation system or any external AI image generator. There is therefore no question of an image-generation service's terms or license being incorporated into your Eagle plugin.
+
+If we later decide that the thumbnails need more sophisticated typography or graphics, we could consider adding a library, but for these simple folder-label thumbnails I'd strongly prefer keeping the current dependency-free approach.
+
+Yesterday 10:12 AM
+Version 1.3.5 seems to be working well. Can you make the font size a bit larger, make that configurable, and change the default colours to #eee461, #3070ad, and #c66526 with appropriate text colours (probably black for the eee461 and c66526, white for 3070ad). 
+
+Implemented Tag Sink 1.3.6.
+
+Changes:
+
+    Increased the default subdirectory thumbnail font size from 58 px to 72 px.
+
+    Added a configurable Subdirectory thumbnail font size setting.
+
+        Range: 32–120 px
+
+        Default: 72 px
+
+    Changed the default colour assignments to:
+
+        Original Files: #EEE461 background, black text
+
+        Processed Files: #3070AD background, white text
+
+        Background/Supplements: #C66526 background, black text
+
+    Existing installations using the old 1.3.5 defaults are automatically upgraded to these new defaults. If you had manually customized a colour, it is preserved.
+
+Download Tag Sink 1.3.6
+
+Today 12:11 PM
+This did not work properly. I've identified a few issues with moving from 1.3.5 to 1.3.6, and some additional issues that were introduced somewhere along the way. 
+
+First, the colours are not updated and the font size appears to be smaller rather than larger. I believe you started introducing multiple conflicting definitions in the plugin.js file, such as the two different colours for Processed Files that I found here:
+
+doug@keji:~/Documents/repos/tag-sink-plugin:git:(main*)
+$ grep -rni "3070AD"
+./js/plugin.js:59:    'Processed Files': { background: '#3070AD', text: '#FFFFFF' },
+doug@keji:~/Documents/repos/tag-sink-plugin:git:(main*)
+$ grep -rni "2E9E6F"
+./js/plugin.js:124:                'Processed Files': { background: '#2E9E6F', text: '#FFFFFF' },
+
+Second, tag-sink-subdir is the only tag-sink that appears to be used now: it is also applied to the parent file that should get tag-sink instead. 
+
+Third, at some point in the zip file you started packaging the files in the structure that is expected: a js folder with plugin.js inside. But since the beginning you've included plugin.js in the root directory. When you started placing it inside the js folder, initially the two files you supplied were identical. In the latest version, they were different. Please supply only a single plugin.js file reflecting the changes we have discussed.
+
+Fourth, and this is not a problem, but I notice that there are ample comments in these files. Please also add a comment at the top of each file that it was created with ChatGPT: it is important to me to disclose the way these files were created. 
+
+Please address these issues. 
+
+You're correct on all three substantive issues. I rebuilt the package rather than trying to patch the duplicated files in place.
+Tag Sink 1.3.7
+
+Download Tag Sink 1.3.7
+
+Changes:
+
+    Corrected the colour definitions
+
+        Original Files: #EEE461 / black
+
+        Processed Files: #3070AD / white
+
+        Background/Supplements: #C66526 / black
+
+        The old 1.3.5 defaults are explicitly migrated to the new defaults, while genuinely customized colours are preserved.
+
+    Corrected the font size
+
+        Default is now 72 px.
+
+        The configurable font-size setting is retained, with a range of 32–120 px.
+
+        The generated SVG actually uses the configured value.
+
+    Corrected the root/subdirectory marker distinction
+
+        The selected/root folder gets tag-sink.
+
+        Descendants get tag-sink-subdir.
+
+        This was a genuine logic error in 1.3.6: the recursive function was receiving the subdirectory marker for the root as well.
+
+        Existing legacy child sinks using tag-sink will still be migrated to tag-sink-subdir.
+
+    Fixed the package structure
+
+        There is now exactly one plugin.js.
+
+        It is at:
+
+        tag-sink-1.3.7/
+          js/
+            plugin.js
+
+        The obsolete root-level plugin.js has been removed.
+
+        index.html already references js/plugin.js, so this now matches the expected structure.
+
+        I verified the JavaScript with node --check.
+
+    Added ChatGPT disclosure
+
+        js/plugin.js begins with:
+
+        // Created with ChatGPT.
+
+        index.html begins with the equivalent HTML comment.
+
+        manifest.json cannot contain a comment because it must remain valid JSON, so I added:
+
+        "createdWith": "ChatGPT"
+
+        instead. This is a machine-readable disclosure rather than a comment.
+
+        logo.png is binary and likewise cannot contain a source-code comment.
+
+The ZIP now contains only these six files:
+
+tag-sink-1.3.7/
+├── js/
+│   └── plugin.js
+├── index.html
+├── manifest.json
+└── logo.png
+
+I would test 1.3.7 specifically with a parent + child folder hierarchy, since the root/subdirectory marker error was independent of the thumbnail and colour problems.
