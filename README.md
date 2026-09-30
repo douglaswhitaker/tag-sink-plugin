@@ -30,7 +30,6 @@ The way Eagle works is by copying files to a library that it keeps organized (in
 
 Version 1.4.0 is the current release. 
 
-
 ### About Development
 
 I am primarily a statistician and educator, not a web developer. To that end, I know neither JavaScript nor Node.js programming. As much as have serious misgivings about the use of generative AI (for the myriad reasons we all recognize), in the year 2026 I also believe that I have a responsibility as an educator to become familiar with the ways that generative AI tools are being used. This plugin is part of that professional development that I am doing: it is definitely 'vibe coding', as it were. The prompts that I used for creating this are available in the `prompts` directory, and I intend to continue to periodically update this as more work is done.
