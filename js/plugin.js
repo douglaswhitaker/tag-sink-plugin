@@ -206,7 +206,12 @@ function uniqueTagsFromItems(items, markerTags) {
 
 // Sync one folder from its own files plus the already-computed tag sets of
 // its direct child folders.
-async function syncOneFolder(folder, markerTag, sinkMarkerTag, childTagSets = [], isRoot = false) {
+async function syncOneFolder(folder, markerTag, childMarkerTag, childTagSets = [], isRoot = false) {
+    // The selected/root folder always uses the root marker. Only descendant
+    // folders use the child-specific marker. This must be determined per
+    // folder, rather than once for the entire recursive operation.
+    const sinkMarkerTag = isRoot ? markerTag : childMarkerTag;
+
     let items = await eagle.item.get({ folders: [folder.id] });
     let sinks = items.filter((item) => (item.tags || []).includes(sinkMarkerTag));
 
@@ -231,6 +236,11 @@ async function syncOneFolder(folder, markerTag, sinkMarkerTag, childTagSets = []
             sinks = items.filter((item) => (item.tags || []).includes(sinkMarkerTag));
         }
     }
+
+    // Multiple sinks are an ambiguous state. Preserve all existing files and
+    // continue synchronizing them, but report the condition so it can be
+    // resolved without the plugin making a destructive choice.
+    const duplicateSinkCount = Math.max(0, sinks.length - 1);
     let createdSink = false;
 
     if (sinks.length === 0) {
@@ -303,6 +313,7 @@ async function syncOneFolder(folder, markerTag, sinkMarkerTag, childTagSets = []
         tags: unionTags,
         tagCount: unionTags.size,
         createdSink,
+        duplicateSinkCount,
     };
 }
 
@@ -622,17 +633,23 @@ async function syncTags() {
 
         if (!recursive) {
             const result = results[0];
+            const duplicateWarning = result.duplicateSinkCount > 0
+                ? ` Warning: ${result.sinks.length} tag-sink files are marked in this folder; all were synchronized.`
+                : '';
             const message = result.sinks.length === 0
                 ? `No tag-sink was created in "${result.folder.name}".`
-                : `Synced ${result.tagCount} tag(s) to ${result.sinks.length} tag-sink file${result.sinks.length === 1 ? '' : 's'} in "${result.folder.name}".`;
-            setStatus(`Synced ${result.tagCount} tag(s) to the tag-sink.`, 'ok');
+                : `Synced ${result.tagCount} tag(s) to ${result.sinks.length} tag-sink file${result.sinks.length === 1 ? '' : 's'} in "${result.folder.name}".${duplicateWarning}`;
+            setStatus(`Synced ${result.tagCount} tag(s) to the tag-sink.${duplicateWarning}`, result.duplicateSinkCount > 0 ? 'warn' : 'ok');
             await showNotification('Tag Sink', message, false);
         } else {
             const created = results.filter((r) => r.createdSink).length;
             const total = results.length;
-            const rootResult = results.find((r) => r.folder.id === currentFolder.id);
-            const message = `Synced ${total} folder${total === 1 ? '' : 's'} in the tree rooted at "${currentFolder.name}". The parent sink includes tags from all descendant folders.`;
-            setStatus(`Synced ${total} folder${total === 1 ? '' : 's'} recursively (${created} with a tag-sink).`, 'ok');
+            const duplicateFolders = results.filter((r) => r.duplicateSinkCount > 0);
+            const duplicateWarning = duplicateFolders.length > 0
+                ? ` Warning: ${duplicateFolders.length} folder${duplicateFolders.length === 1 ? '' : 's'} contain multiple tag-sink files; all were synchronized.`
+                : '';
+            const message = `Synced ${total} folder${total === 1 ? '' : 's'} in the tree rooted at "${currentFolder.name}". The parent sink includes tags from all descendant folders.${duplicateWarning}`;
+            setStatus(`Synced ${total} folder${total === 1 ? '' : 's'} recursively (${created} with a tag-sink).${duplicateWarning}`, duplicateFolders.length > 0 ? 'warn' : 'ok');
             await showNotification('Tag Sink', message, false);
         }
 
@@ -715,6 +732,7 @@ function saveSubdirectoryColorSettings() {
 // ---- Wire up the UI -----------------------------------------------------
 function initUI() {
     $('markerTagInput').value = getMarkerTag();
+    $('contextTagInput').value = getContextTag();
     $('autoCloseCheckbox').checked = getAutoClose();
     $('recursiveCheckbox').checked = getRecursive();
     renderSubdirectoryColorSettings();
@@ -738,6 +756,12 @@ function initUI() {
         $('markerTagInput').value = getMarkerTag();
         setStatus(`Marker tag set to "${getMarkerTag()}".`, 'ok');
         renderItemList(currentItems);
+    });
+
+    $('saveContextTagBtn').addEventListener('click', () => {
+        setContextTag($('contextTagInput').value);
+        $('contextTagInput').value = getContextTag();
+        setStatus(`Context image tag set to "${getContextTag()}".`, 'ok');
     });
 
     $('recursiveCheckbox').addEventListener('change', () => {

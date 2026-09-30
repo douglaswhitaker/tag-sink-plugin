@@ -1,0 +1,858 @@
+Tag Sink v1.3.5.zip
+Zip Archive
+This is the current working version (that I think is functional-ish) of the Eagle plugin. Please inspect it and tell me how you think it works.
+
+I inspected the complete v1.3.5 package, including manifest.json, index.html, and the full js/plugin.js. The JavaScript also passes Node's syntax check.
+What the plugin is doing
+
+The basic conceptual model is:
+
+    A folder represents a dataset; the tag-sink is a representative file whose tags are the union of the tags used by the dataset's other files.
+
+So if a folder contains:
+File	Tags
+data.csv	survey, csv, participants
+code.R	survey, R, analysis
+paper.pdf	survey, publication
+DatasetName ← sink	survey, csv, participants, R, analysis, publication, tag-sink
+
+Searching Eagle for any of those substantive tags should therefore find the sink, which represents the entire folder/dataset.
+
+The plugin deliberately makes this a full synchronization, rather than an additive operation. If publication is removed from paper.pdf, the next sync removes publication from the sink as well.
+1. There are really two modes
+Normal mode
+
+Only the currently selected Eagle folder is processed.
+
+Selected folder
+├── file A
+├── file B
+├── file C
+└── tag-sink
+
+The sink gets the union of tags from A, B, and C.
+
+The marker is:
+
+tag-sink
+
+by default.
+Recursive mode
+
+The selected folder becomes the root of a folder tree:
+
+Dataset
+├── Original Files
+│   ├── data.csv
+│   └── metadata.pdf
+├── Processed Files
+│   ├── cleaned.csv
+│   └── analysis.R
+└── Background/Supplements
+    ├── paper.pdf
+    └── image.png
+
+Each folder gets its own sink:
+
+Dataset
+├── Original Files
+│   ├── data.csv
+│   ├── metadata.pdf
+│   └── Original Files ← child sink
+├── Processed Files
+│   ├── cleaned.csv
+│   ├── analysis.R
+│   └── Processed Files ← child sink
+├── Background/Supplements
+│   ├── paper.pdf
+│   ├── image.png
+│   └── Background/Supplements ← child sink
+└── Dataset ← root sink
+
+The child sinks use:
+
+tag-sink-subdir
+
+while the root uses:
+
+tag-sink
+
+That distinction is important because it means a search for tag-sink identifies dataset-level sinks without treating every child-folder sink as another dataset.
+2. Recursive synchronization is bottom-up
+
+This is probably the most important part of the implementation.
+
+syncFolderTree() first recursively processes all children:
+
+child
+    ↓
+grandchild
+    ↓
+...
+
+and only then processes the parent.
+
+So conceptually:
+
+Process deepest folder
+       ↓
+Get its tag union
+       ↓
+Give that union to its parent
+       ↓
+Process parent
+       ↓
+Give parent's union to grandparent
+       ↓
+...
+       ↓
+Process root
+
+For example:
+
+Original Files
+    own tags = {csv, raw-data, participants}
+    ↓
+Original Files sink gets those tags
+
+Dataset
+    own tags = {survey, documentation}
+    +
+    Original Files tags = {csv, raw-data, participants}
+    ↓
+Dataset sink gets:
+{survey, documentation, csv, raw-data, participants}
+
+With multiple children, their tag sets are unioned.
+
+This is a good architectural choice because it avoids repeatedly walking the entire tree to calculate the root's tags.
+3. Sink files are explicitly excluded from tag aggregation
+
+This is a particularly important detail.
+
+uniqueTagsFromItems() ignores anything carrying either the root or child sink marker.
+
+That prevents this problem:
+
+Initial sync:
+sink = {A, B, C, tag-sink}
+
+Later:
+source files = {A, B}
+
+If the sink itself were included, the old C would remain forever:
+
+{A, B} ∪ {A, B, C} = {A, B, C}
+
+Instead, the plugin calculates only from source files:
+
+{A, B}
+
+and replaces the sink's tags with that set.
+
+That makes the synchronization genuinely reversible.
+4. It doesn't just add tags—it replaces the sink's tags
+
+This is another important implementation detail.
+
+Eventually it does essentially:
+
+sink.tags = finalTags;
+await sink.save();
+
+So the sink is treated as a derived object, rather than an independently maintained file.
+
+The implication is that you should generally not manually add arbitrary tags to the sink, because the next synchronization will remove any tag that isn't supported by a source file.
+
+That's consistent with the design described in the comments.
+5. It can create the sink automatically
+
+If a folder doesn't have an appropriate sink, the plugin creates one.
+
+For the root folder it tries, in order:
+
+    An image explicitly carrying the configured context-image tag
+
+    An image whose filename matches the folder name
+
+    The folder's only image, if there is exactly one
+
+    Otherwise, a tiny blank PNG
+
+The default context tag is:
+
+context-image
+
+So, for example:
+
+My Dataset/
+    My Dataset.png    ← candidate
+    data.csv
+    paper.pdf
+
+could use My Dataset.png as the visual basis for the sink.
+
+The new sink gets named after the folder.
+6. Child-folder sinks work differently
+
+Child sinks aren't intended to use an existing image.
+
+Instead, the plugin generates an SVG thumbnail containing the folder name:
+
+┌──────────────────────┐
+│                      │
+│    Original Files    │
+│                      │
+└──────────────────────┘
+
+The background colour comes from the configured folder-colour table.
+
+If a folder doesn't have an explicitly configured colour, it generates a deterministic colour from the folder name.
+
+That means:
+
+Original Files
+
+will consistently get the same generated colour without needing the folder to be configured.
+
+This is a nice touch because it means the visual representation of child folders is generated rather than dependent on whatever images happen to be in the folder.
+7. Existing child sinks are migrated
+
+There is some backward-compatibility logic specifically for the transition from the previous design.
+
+If a child folder has:
+
+tag-sink
+
+but doesn't have:
+
+tag-sink-subdir
+
+the plugin assumes that the old tag-sink represents a child sink and changes it to:
+
+tag-sink-subdir
+
+It does this before creating a new sink.
+
+So it is attempting to prevent an upgrade from producing:
+
+old child sink
++
+new child sink
+
+in the same folder.
+
+It also handles the possibility that an older version accidentally created multiple marker-tagged sinks in one child folder.
+8. The "Add File Types to Files" button is separate
+
+This isn't part of synchronization itself.
+
+If you click it, the plugin examines each source file's Eagle extension and adds it as a tag:
+
+data.csv   → csv
+analysis.R → r
+paper.pdf  → pdf
+data.xlsx  → xlsx
+
+Importantly, these tags are added to the original files, not the sink.
+
+Then the normal synchronization process can propagate those tags to the appropriate sink.
+
+That's a good separation of responsibilities:
+
+Add File Types
+      ↓
+modify source metadata
+
+Sync
+      ↓
+derive sink metadata
+
+In recursive mode, file types are added throughout the entire folder tree.
+9. The UI state is deliberately local
+
+The following settings are stored in localStorage:
+
+    marker tag
+
+    recursive mode
+
+    context-image tag
+
+    automatic close
+
+    child-folder colours
+
+So these are settings for the plugin installation/window, not Eagle metadata attached to a particular dataset.
+
+For example, changing:
+
+Marker tag = dataset-sink
+
+changes what the plugin looks for globally.
+
+It doesn't change an individual folder's configuration.
+10. The plugin is not currently doing anything with keyboard shortcuts
+
+This is significant given the earlier versions you were experimenting with.
+
+The lifecycle handlers are:
+
+eagle.onPluginCreate(...)
+eagle.onPluginRun(...)
+eagle.onPluginShow(...)
+
+But onPluginRun() explicitly does nothing other than log:
+
+Tag Sink launched. Use the window controls to run an operation.
+
+So the current version is not attempting to interpret plugin launch as "run sync."
+
+Likewise, there is no shortcut registration code in this version.
+
+The actual operations are triggered by the UI buttons:
+
+Refresh
+Sync Tags to Tag-Sink
+Add File Types to Files
+
+That matches your earlier conclusion that the shortcut API wasn't proving reliable.
+11. There is some careful handling of Eagle's initialization race
+
+This part is more sophisticated than it initially looks.
+
+The plugin creates:
+
+pluginReadyPromise
+
+and doesn't resolve it until onPluginCreate() has finished its initial setup/refresh.
+
+Other operations wait for that promise before calling things such as:
+
+eagle.folder.getSelected()
+
+This was apparently added to deal with Eagle sometimes firing plugin-show before plugin initialization has completed.
+
+So the lifecycle is approximately:
+
+Plugin loaded
+      ↓
+plugin-create
+      ↓
+initialize UI
+      ↓
+initial refresh
+      ↓
+resolve "ready"
+      ↓
+normal operations allowed
+
+That is specifically addressing the initialization error you had encountered earlier.
+12. The overall architecture
+
+I'd describe the current plugin architecture as:
+
+                    Eagle
+                      │
+                      ▼
+              Selected folder
+                      │
+             ┌────────┴────────┐
+             │                 │
+        Normal mode       Recursive mode
+             │                 │
+             ▼                 ▼
+       syncOneFolder     syncFolderTree
+                               │
+                     bottom-up traversal
+                               │
+                 ┌─────────────┴────────────┐
+                 ▼                          ▼
+          child tag unions             parent files
+                 │                          │
+                 └────────────┬─────────────┘
+                              ▼
+                       union of tags
+                              │
+                              ▼
+                         sink file
+                              │
+                    ┌─────────┴─────────┐
+                    │                   │
+             marker tag           synchronized
+                                  tag union
+
+And separately:
+
+Add File Types
+      │
+      ▼
+Source files
+      │
+      ▼
+extension → tag
+      │
+      ▼
+normal Sync process
+
+What I think is particularly important about 1.3.5
+
+The code is actually fairly coherent now. The central abstraction is consistent throughout:
+
+    Source files are authoritative; sinks are derived indexes.
+
+That principle is reflected in several places:
+
+    sink files are excluded from tag collection;
+
+    synchronization replaces rather than adds sink tags;
+
+    child sinks feed their derived tag sets upward;
+
+    file-type tags are applied to source files rather than sinks;
+
+    generated child thumbnails are merely visual representations of derived sinks;
+
+    the root and child marker tags distinguish different roles.
+
+There are also some reasonable defensive measures around temporary files, HTML/SVG escaping, invalid colours, duplicate tags, Eagle notifications, and plugin initialization.
+One architectural assumption I'd keep an eye on
+
+The recursive system depends on Eagle's folder.children representing the folder hierarchy as expected:
+
+const children = Array.isArray(folder.children) ? folder.children : [];
+
+The entire recursive feature depends on that object being populated correctly. If it is, the traversal logic itself is straightforward and sensible.
+One subtle behavioural consequence
+
+A parent sink represents the union of everything below it, not merely the files immediately inside that folder.
+
+So with:
+
+Dataset
+├── data.csv        tag: A
+├── Original/
+│   └── raw.csv     tag: B
+└── Analysis/
+    └── analysis.R  tag: C
+
+the sinks effectively become:
+
+Original sink → B
+Analysis sink → C
+Dataset sink → A + B + C
+
+That appears to be the central purpose of the recursive implementation.
+
+Overall, I would characterize v1.3.5 as a small, single-file JavaScript/Eagle plugin with a deliberately simple data model, rather than as an overly complicated plugin architecture. The complexity is concentrated almost entirely in syncOneFolder() / syncFolderTree(), which is where it belongs.
+
+Yes. I would bundle a few of the previously identified issues with this fix, but only the ones that are tightly coupled to the marker-selection problem. I would avoid turning this into a broad cleanup release.
+I recommend fixing these together
+
+    Root-vs-child marker selection — definite bug
+
+        Root sink → tag-sink
+
+        Child sink → tag-sink-subdir
+
+        This fixes both cases you just identified.
+
+    Existing root-sink detection in recursive mode — part of the same bug
+
+        Once marker selection is corrected, syncOneFolder() must also use the root marker when isRoot === true.
+
+        Otherwise an existing correctly tagged tag-sink could still be missed and a duplicate created.
+
+        I would consider this part of the same fix rather than a separate enhancement.
+
+    Context Image Tag UI bug
+
+        This is a small, isolated, definite bug.
+
+        The setting currently cannot actually be changed through the UI despite the controls being present.
+
+        It is low-risk to fix alongside the synchronization work.
+
+I would probably also add
+
+    Duplicate-sink detection/warning
+
+        Don't automatically delete or demote duplicates.
+
+        If a folder contains multiple files carrying the relevant sink marker, report that explicitly.
+
+        This is particularly useful now that we're correcting root/child marker identification, because it gives us a way to detect the bad state rather than silently perpetuating it.
+
+For example:
+
+Warning: 2 tag-sink files found in "Dataset".
+Both will be synchronized.
+
+Or, if we decide the intended invariant is strictly one sink:
+
+Warning: Multiple tag-sink files found in "Dataset".
+Please resolve the duplicate before synchronizing.
+
+I prefer the second behavior for now, because automatically choosing which file is the canonical sink could destroy or alter something the user intentionally kept.
+I would not bundle these yet
+
+I would leave these for a later release:
+
+    changing the marker tag migration behavior;
+
+    changing the file-extension tag scheme;
+
+    introducing persistent sink IDs/metadata;
+
+    optimizing recursive API calls;
+
+    changing the generated thumbnails;
+
+    major changes to error/transaction handling;
+
+    broader refactoring of the plugin architecture.
+
+Those require decisions about intended behavior rather than simply correcting an implementation error.
+One additional change I'd make while fixing the marker bug
+
+I'd simplify the terminology in the code.
+
+Instead of calculating a global:
+
+sinkMarkerTag
+
+and passing it down the recursive tree, the code should derive the marker at the point where a particular folder is processed:
+
+isRoot?
+    yes → markerTag
+    no  → subdirectoryMarkerTag
+
+That makes the invariant explicit:
+
+Root folder     → root marker
+Child folder    → child marker
+
+and makes it much harder for this exact bug to recur.
+
+So my proposed scope for the next version would be:
+
+    Fix root/child marker handling + fix Context Image Tag setting + add safe duplicate-sink detection.
+
+I would keep everything else unchanged.
+
+Implement this change: Fix root/child marker handling + fix Context Image Tag setting + add safe duplicate-sink detection.
+
+Make version 1.4.0
+
+Implemented as Tag Sink v1.4.0.
+
+Changes:
+
+    Fixed root/child marker handling
+
+        Root/selected folder always uses the configured marker, e.g. tag-sink.
+
+        Descendant folders use the derived child marker, e.g. tag-sink-subdir.
+
+        This applies consistently to both sink creation and sink discovery.
+
+    Fixed Context Image Tag setting
+
+        The current saved value is loaded into the settings field.
+
+        The Save button now actually persists the setting and updates the UI.
+
+    Added safe duplicate-sink detection
+
+        Multiple sinks are detected.
+
+        Existing sinks are all preserved and synchronized; nothing is deleted or arbitrarily selected.
+
+        The user receives a warning when duplicates are encountered.
+
+        Recursive synchronization reports how many folders had duplicate sinks.
+
+    Version updated to 1.4.0.
+
+Validation:
+
+    JavaScript syntax check: passed.
+
+    Manifest JSON validation: passed.
+
+    Packaged archive validation: passed.
+
+    The first ad-hoc runtime test had a faulty test stub rather than a plugin error; I corrected the stub and the marker-selection test passed.
+
+Download Tag Sink v1.4.0
+Ad
+
+Good, all of these changes seem to have been implemented properly. What changes would you prioritize next? 
+
+Now that 1.4.0 has the core behavior working, I would prioritize the next changes in roughly this order.
+1. Improve error handling and partial-sync reporting
+
+This is the first thing I would address.
+
+Recursive synchronization currently operates sequentially, but if something fails partway through, the earlier folders have already been modified. The final message is essentially:
+
+    Sync failed — see DevTools console.
+
+That leaves an important ambiguity: how much of the tree actually succeeded?
+
+For example:
+
+Dataset
+├── Raw        ✓
+├── Processed  ✓
+├── Analysis   ✗
+└── Papers     not attempted
+
+The user should be told that explicitly.
+Proposed behavior
+
+Track successful/failed folders and report something like:
+
+Recursive sync partially completed:
+3 of 5 folders synchronized.
+Failed: Analysis
+
+The error details could remain in DevTools, while the UI/notification gives the useful operational information.
+
+Priority: High.
+2. Verify and harden recursive folder discovery
+
+This is the biggest architectural uncertainty I identified.
+
+The implementation relies on:
+
+folder.children
+
+to discover descendants.
+
+The code itself is clean, but if Eagle's selected-folder object doesn't always contain a complete child hierarchy, recursive mode could silently omit folders.
+
+The particularly problematic behavior is that:
+
+const children = Array.isArray(folder.children) ? folder.children : [];
+
+turns a missing/unavailable children property into "there are no children."
+
+I'd want to establish empirically that Eagle reliably supplies the complete hierarchy in the situations you care about.
+Improvement
+
+Add some diagnostic information during development, perhaps:
+
+Root: Dataset
+Folders discovered: 12
+
+and potentially a debug listing of the folder paths.
+
+Once verified, the diagnostics could be reduced or removed.
+
+Priority: High, but investigate before changing code.
+3. Decide what should happen when there are duplicate sinks
+
+1.4.0 safely detects duplicates, which is the right conservative behavior.
+
+But it currently continues by synchronizing all of them.
+
+That leaves the underlying ambiguity unresolved:
+
+Dataset/
+├── Dataset.jpg     [tag-sink]
+├── Dataset copy.jpg [tag-sink]
+└── data.csv
+
+Both files become representations of the same dataset.
+
+I would not automatically delete one, but I think the eventual design should probably distinguish between:
+Normal state
+
+0 → create one
+1 → use it
+
+Exceptional state
+
+2+ → warn user and don't silently treat this as normal
+
+The question is whether synchronization should:
+
+    continue with all duplicates, as it currently does;
+
+    stop and require resolution; or
+
+    offer a UI action such as "Choose canonical sink."
+
+I would defer that behavioral decision until you've encountered how duplicates actually arise in normal use.
+
+Priority: Medium.
+4. Marker-tag changes need migration semantics
+
+This is the other significant data-model issue.
+
+Currently a user can change:
+
+tag-sink
+
+to:
+
+dataset-sink
+
+but existing sinks don't automatically migrate.
+
+That can produce:
+
+old sink: [tag-sink]
+new sink: [dataset-sink]
+
+after synchronization.
+
+This is potentially confusing because changing a setting looks like a simple configuration change, while it actually changes the identity of existing sinks.
+I would eventually make the setting behave more like a migration
+
+For example:
+
+Current marker:
+tag-sink
+
+New marker:
+dataset-sink
+
+[Cancel] [Change and migrate existing sinks]
+
+But this deserves careful thought because changing a marker could affect many folders in the library.
+
+Priority: Medium-high, but don't implement casually.
+5. Fix the context-image tag propagation question
+
+There is a subtle issue still present in 1.4.0.
+
+If:
+
+context-image
+
+is the configured context-image tag, and an image has:
+
+context-image
+survey
+cover
+
+the newly created sink gets those tags.
+
+The synchronization process subsequently treats context-image as an ordinary source tag and keeps it.
+
+So the sink ends up with:
+
+context-image
+survey
+cover
+tag-sink
+
+The question is whether context-image is:
+A. Metadata
+
+    This image is intentionally the dataset's context image.
+
+Then keeping the tag is reasonable.
+B. An instruction to the plugin
+
+    Use this image when creating the sink.
+
+Then it probably shouldn't propagate to the sink.
+
+I would resolve this conceptually before changing anything. Given the way you described the system previously, I suspect B may be closer to the intended semantics, but I wouldn't change it without deciding that explicitly.
+
+Priority: Medium.
+6. Add a "dry run" / preview mode
+
+This would become particularly useful as the plugin grows.
+
+Before modifying anything, the plugin could calculate:
+
+Dataset
+  Existing sink: Dataset
+  Tags to add: 4
+  Tags to remove: 2
+
+Original Files
+  Existing sink: Original Files
+  Tags to add: 1
+  Tags to remove: 0
+
+Analysis
+  No sink → create one
+
+Then:
+
+[Cancel] [Synchronize]
+
+I wouldn't necessarily make this the default. A preview button could be enough.
+
+This would make the plugin much safer for a large Eagle library.
+
+Priority: Medium, probably a larger feature rather than a 1.4.x patch.
+7. Improve the distinction between "source" and "sink"
+
+The current architecture is fundamentally:
+
+source files
+      ↓
+tag calculation
+      ↓
+sink
+
+That is good.
+
+But the code identifies sinks almost entirely through tags.
+
+That means removing the marker from a sink transforms it, from the plugin's perspective, into an ordinary source file.
+
+I don't think this needs fixing immediately. A persistent sink identifier would complicate the plugin considerably.
+
+Instead, I would first make the conceptual distinction explicit in the UI/documentation and perhaps add diagnostics for suspicious situations.
+
+Priority: Low-medium.
+8. Performance optimization
+
+I would not prioritize this yet.
+
+The current sequential processing is conservative and easier to reason about. There are plenty of API calls, but until you have a realistic large folder tree that feels slow, optimization risks introducing concurrency problems without solving an actual user problem.
+
+I'd measure first.
+
+Priority: Low for now.
+My proposed roadmap
+
+If we're treating releases as small, understandable increments, I'd probably do:
+1.4.1
+
+Reliability
+
+    partial recursive-sync reporting;
+
+    better error identification;
+
+    possibly basic folder-count diagnostics.
+
+1.4.2
+
+Configuration/data integrity
+
+    decide and implement marker-tag migration behavior;
+
+    decide whether context-image is metadata or an internal instruction.
+
+1.5.0
+
+Workflow improvement
+
+    preview/dry-run;
+
+    better duplicate-sink resolution;
+
+    potentially clearer recursive-sync UI.
+
+I would not undertake a major refactor right now. The current 1.4.0 architecture is sufficiently understandable that incremental changes are preferable.
+
+One thing I particularly like about the current state is that the last bug exposed a conceptual problem rather than merely a typo: isRoot existed but wasn't being used consistently. I'd therefore favor changes that make the plugin's invariants more explicit in the code—especially "root sink uses root marker; descendant sink uses child marker; sinks are derived outputs"—rather than adding more abstractions.
