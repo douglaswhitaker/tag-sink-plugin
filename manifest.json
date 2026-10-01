@@ -1,6 +1,6 @@
 {
     "id": "TAGSINKPLUGIN01",
-    "version": "1.4.0",
+    "version": "1.4.2",
     "platform": "all",
     "arch": "all",
     "name": "Tag Sink",

@@ -191,6 +191,8 @@ const pluginReadyPromise = new Promise((resolve) => {
 // lookup and lets us process each subtree bottom-up in one recursive pass.
 function uniqueTagsFromItems(items, markerTags) {
     const markers = new Set(Array.isArray(markerTags) ? markerTags : [markerTags]);
+    const contextTag = getContextTag();
+    if (contextTag) markers.add(contextTag);
     const tags = new Set();
     items.forEach((item) => {
         // Sink files are outputs of this plugin, not source files. Excluding
@@ -245,7 +247,7 @@ async function syncOneFolder(folder, markerTag, childMarkerTag, childTagSets = [
 
     if (sinks.length === 0) {
         if (isRoot) {
-            const contextImage = findContextImage(items, folder);
+            const contextImage = await findContextImage(items, folder);
             if (contextImage) {
                 await createSinkFromContextImage(contextImage, folder, sinkMarkerTag);
             } else {
@@ -292,7 +294,7 @@ async function syncOneFolder(folder, markerTag, childMarkerTag, childTagSets = [
     const unionTags = uniqueTagsFromItems(items, [markerTag, sinkMarkerTag]);
     childTagSets.forEach((tagSet) => {
         tagSet.forEach((tag) => {
-            if (tag !== markerTag && tag !== sinkMarkerTag) unionTags.add(tag);
+            if (tag !== markerTag && tag !== sinkMarkerTag && tag !== getContextTag()) unionTags.add(tag);
         });
     });
 
@@ -463,22 +465,74 @@ function createPlaceholderImageFile(baseName) {
 }
 
 // Find an optional context image to use as the visual for a newly-created
-// sink. The order is deliberately conservative: an explicitly marked image
-// wins; then an image whose base filename matches the folder; finally, if the
-// folder contains exactly one image, use that. If several images exist and
-// none is identified, the plugin falls back to the blank placeholder.
-function findContextImage(items, folder) {
+// sink. An explicitly marked image in the current folder wins. If there is
+// no such image, marked images are searched for recursively in descendant
+// folders. A single descendant match is copied to the parent folder and used
+// exactly like a context image that was already in the parent. Multiple
+// tagged matches are treated as ambiguous and do not fall through to the
+// filename/single-image heuristics.
+//
+// The filename and single-image fallbacks remain intentionally local to the
+// current folder: only an explicitly configured context-image tag authorizes
+// an image in a descendant folder to be used by the parent.
+async function findContextImage(items, folder) {
     const imageExts = new Set([
         'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'svg', 'heic', 'avif'
     ]);
-    const images = items.filter((item) => imageExts.has(String(item.ext || '').toLowerCase().replace(/^\./, '')));
-    if (images.length === 0) return null;
+    const isImage = (item) => imageExts.has(
+        String(item.ext || '').toLowerCase().replace(/^\./, '')
+    );
+    const isSink = (item) =>
+        (item.tags || []).includes(getMarkerTag()) ||
+        (item.tags || []).includes(getSubdirectoryMarkerTag());
 
     const contextTag = getContextTag();
     if (contextTag) {
-        const tagged = images.filter((item) => (item.tags || []).includes(contextTag));
-        if (tagged.length === 1) return tagged[0];
+        const taggedHere = items.filter(
+            (item) => isImage(item) && !isSink(item) && (item.tags || []).includes(contextTag)
+        );
+
+        if (taggedHere.length === 1) return taggedHere[0];
+        if (taggedHere.length > 1) {
+            throw new Error(
+                `Multiple context images tagged "${contextTag}" found in folder "${folder.name || 'selected folder'}".`
+            );
+        }
+
+        const descendantMatches = [];
+        const children = Array.isArray(folder.children) ? folder.children : [];
+
+        async function searchDescendants(childrenToSearch) {
+            for (const child of childrenToSearch) {
+                const childItems = await eagle.item.get({ folders: [child.id] });
+                const tagged = childItems.filter(
+                    (item) => isImage(item) && !isSink(item) && (item.tags || []).includes(contextTag)
+                );
+
+                descendantMatches.push(...tagged);
+
+                if (descendantMatches.length > 1) return;
+
+                const grandchildren = Array.isArray(child.children) ? child.children : [];
+                if (grandchildren.length > 0) {
+                    await searchDescendants(grandchildren);
+                    if (descendantMatches.length > 1) return;
+                }
+            }
+        }
+
+        await searchDescendants(children);
+
+        if (descendantMatches.length === 1) return descendantMatches[0];
+        if (descendantMatches.length > 1) {
+            throw new Error(
+                `Multiple context images tagged "${contextTag}" found in descendants of "${folder.name || 'selected folder'}".`
+            );
+        }
     }
+
+    const images = items.filter(isImage);
+    if (images.length === 0) return null;
 
     const folderName = String(folder.name || '').trim().toLowerCase();
     if (folderName) {
@@ -499,7 +553,10 @@ async function createSinkFromContextImage(contextImage, folder, markerTag) {
     const tmpPath = path.join(os.tmpdir(), `${safeName}-${Date.now()}.${ext}`);
     fs.copyFileSync(contextImage.filePath, tmpPath);
 
-    const sourceTags = (contextImage.tags || []).filter((tag) => tag !== markerTag);
+    const contextTag = getContextTag();
+    const sourceTags = (contextImage.tags || []).filter(
+        (tag) => tag !== markerTag && tag !== getSubdirectoryMarkerTag(markerTag) && tag !== contextTag
+    );
     const itemId = await eagle.item.addFromPath(tmpPath, {
         name: folder.name || 'tag-sink',
         tags: [...new Set([...sourceTags, markerTag])],
