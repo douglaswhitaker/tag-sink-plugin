@@ -28,7 +28,11 @@ The way Eagle works is by copying files to a library that it keeps organized (in
 
 ### Current Release
 
-Version 1.4.0 is the current release. This is a beta/pre-production release: I'm using this plugin now to organize my datasets, but I make no guarantees about it (see note below). Even if this plugin misbehaves in someway, I imagine that the consequences would be fairly minor (mostly related to tag aggregation in Eagle), but do not use this in any critical environments. 
+Version 1.4.2 is the current release. This is a beta/pre-production release: I'm using this plugin now to organize my datasets, but I make no guarantees about it (see note below). Even if this plugin misbehaves in someway, I imagine that the consequences would be fairly minor (mostly related to tag aggregation in Eagle), but do not use this in any critical environments. 
+
+### See Also
+
+If you're interested in this plugin, there's a good chance you might also be interested in my other Eagle plugin which adds preview support for common data and code file types: [Data Preview](https://github.com/douglaswhitaker/data-preview-plugin)
 
 ### About Development
 
